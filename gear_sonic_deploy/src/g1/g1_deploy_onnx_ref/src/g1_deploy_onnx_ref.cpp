@@ -3834,6 +3834,23 @@ class G1Deploy {
     void Control() {
       if (operator_state.stop) { return; }
 
+      // Calibration must be possible before start, when g1_debug is not yet
+      // published. Only expose fresh measured joints after initialization;
+      // this does not run inference or alter motor/hand commands.
+      if (program_state_ != ProgramState::INIT) {
+        const auto measured = low_state_buffer_.GetDataWithTime();
+        const auto age = std::chrono::steady_clock::now() - measured.timestamp;
+        if (measured.data && age <= LOW_STATE_LATE_THRESHOLD) {
+          std::array<double, 29> q;
+          for (size_t i = 0; i < q.size(); ++i) {
+            q[i] = measured.data->motor_state()[i].q();
+          }
+          for (auto& oi : output_interfaces_) {
+            if (oi) oi->publish_calibration_state(q, std::chrono::duration<double>(age).count());
+          }
+        }
+      }
+
       switch (program_state_) {
         case ProgramState::INIT:
           if (!InitControl()) {

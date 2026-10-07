@@ -1,5 +1,9 @@
 # PICO VR Whole-body Teleop 
 
+For stationary manipulation with controllers and **no ankle trackers or body
+tracking**, use the opt-in [arms-only workflow](arms_only_teleop.md). The full-body
+setup and calibration instructions below apply to the original mode.
+
 Full whole-body teleoperation using PICO VR headset and controllers. To teleop, use the option  `--input-type zmq_manager` during deployment. The `zmq_manager` input type switches between a **planner mode** (locomotion commands via ZMQ) and a **streamed motion mode** (full-body SMPL poses from PICO).
 
 ## SONIC Low Latency

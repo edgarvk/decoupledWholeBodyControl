@@ -6,11 +6,27 @@
 #include <mutex>
 #include <sstream>
 #include <array>
+#include <chrono>
 #include <nlohmann/json.hpp>
 #include "PXREARobotSDK.h"
 
 
 using json = nlohmann::json;
+
+// One complete device packet, independent of Body/Hand tracking. The legacy
+// per-device getters retain old values when a device disappears from a packet.
+// This snapshot intentionally does not: presence and receive age are observable.
+std::mutex controllerSnapshotMutex;
+json controllerSnapshot = json::object();
+std::chrono::steady_clock::time_point controllerSnapshotReceived;
+
+std::string getControllerSnapshot() {
+    std::lock_guard<std::mutex> lock(controllerSnapshotMutex);
+    auto result = controllerSnapshot;
+    result["receive_age_s"] = std::chrono::duration<double>(
+        std::chrono::steady_clock::now() - controllerSnapshotReceived).count();
+    return result.dump();
+}
 
 std::array<double, 7> LeftControllerPose;
 std::array<double, 7> RightControllerPose;
@@ -98,6 +114,10 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
         std::cout << "server connect\n" << std::endl;
         break;
     case PXREAServerDisconnect:
+        {
+            std::lock_guard<std::mutex> lock(controllerSnapshotMutex);
+            controllerSnapshot = json::object();
+        }
         std::cout << "server disconnect\n" << std::endl;
         break;
     case PXREADeviceFind:
@@ -117,6 +137,15 @@ void OnPXREAClientCallback(void* context, PXREAClientCallbackType type, int stat
             json data = json::parse(dsj.stateJson);
             if (data.contains("value")) {
                 auto value = json::parse(data["value"].get<std::string>());
+                {
+                    json snapshot = json::object();
+                    for (const auto* key : {"Controller", "Head", "timeStampNs", "appState"}) {
+                        if (value.contains(key)) snapshot[key] = value[key];
+                    }
+                    std::lock_guard<std::mutex> lock(controllerSnapshotMutex);
+                    controllerSnapshot = std::move(snapshot);
+                    controllerSnapshotReceived = std::chrono::steady_clock::now();
+                }
                 if (value["Controller"].contains("left")) {
                     auto& left = value["Controller"]["left"];
                     {
@@ -496,6 +525,9 @@ int SendBytesToDeviceWrapper(const std::string& dev_id, pybind11::bytes blob) {
 
 
 PYBIND11_MODULE(xrobotoolkit_sdk, m) {
+    m.def("get_controller_snapshot", &getControllerSnapshot,
+          "Atomic Head/Controller JSON packet with receive_age_s; no body tracking required. "
+          "Packet presence does not imply optical tracking validity.");
     m.def("init", &init, "Initialize the PXREARobot SDK.");
     m.def("close", &deinit, "Deinitialize the PXREARobot SDK.");
     m.def("get_left_controller_pose", &getLeftControllerPose, "Get the left controller pose.");

@@ -2162,6 +2162,22 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--arms-only", action="store_true",
+        help="Direct XRT controllers, fixed torso target, stationary SONIC VR_3PT",
+    )
+    parser.add_argument(
+        "--left-grip-offset", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+        metavar=("X", "Y", "Z"), help="Local grip-to-command-point offset (metres)",
+    )
+    parser.add_argument(
+        "--right-grip-offset", type=float, nargs=3, default=[0.0, 0.0, 0.0],
+        metavar=("X", "Y", "Z"), help="Local grip-to-command-point offset (metres)",
+    )
+    parser.add_argument(
+        "--arms-only-timing", action="store_true",
+        help="Log source and outgoing target timestamps for latency trials",
+    )
     parser.add_argument("--buffer_size", type=int, default=15, help="Sliding window buffer size")
     parser.add_argument("--port", type=int, default=5556, help="ZMQ server port (default: 5556)")
     parser.add_argument(
@@ -2252,6 +2268,27 @@ if __name__ == "__main__":
         ),
     )
     args = parser.parse_args()
+
+    if args.arms_only:
+        if not args.manager or args.input_source != "xrt":
+            parser.error("--arms-only requires --manager --input-source xrt")
+        if any((
+            args.vr3pt_test, args.vr3pt_live, args.vr3pt_realtime,
+            args.vis_smpl, args.waist_tracking, args.vis_vr3pt, args.record_dir,
+        )):
+            parser.error(
+                "--arms-only uses a headless direct-pose path; "
+                "visualization/SMPL recording flags are unsupported"
+            )
+        if not 1 <= args.target_fps <= 100:
+            parser.error("--arms-only --target_fps must be between 1 and 100")
+        from gear_sonic.utils.teleop.arms_only import run_arms_only_manager
+
+        run_arms_only_manager(
+            args, xrt, init_hand_ik_solvers, compute_hand_joints_from_inputs,
+            get_abxy_buttons, get_controller_inputs, get_axis_clicks,
+        )
+        raise SystemExit(0)
 
     # Standalone VR3Pt test modes (exit after finishing)
     if args.vr3pt_test:

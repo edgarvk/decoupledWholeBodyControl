@@ -153,6 +153,20 @@ public:
         type_ = OutputType::ZMQ;
     }
 
+    /// Pre-start calibration feedback, separate from policy/visualization output.
+    void publish_calibration_state(const std::array<double, 29>& measured_q,
+                                   double state_age_s) override {
+        msgpack::sbuffer buffer;
+        msgpack::packer<msgpack::sbuffer> pk(&buffer);
+        pk.pack_map(2);
+        pk.pack("body_q_measured");
+        pk.pack_array(measured_q.size());
+        for (const auto& q : measured_q) pk.pack(q);
+        pk.pack("state_age_s");
+        pk.pack(state_age_s);
+        send_zmq_message("g1_calibration", buffer);
+    }
+
     /**
      * @brief Send combined visualisation + state-logger data in a single ZMQ message (non-blocking, called each tick).
      *
