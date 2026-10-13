@@ -2178,6 +2178,14 @@ if __name__ == "__main__":
         "--arms-only-timing", action="store_true",
         help="Log source and outgoing target timestamps for latency trials",
     )
+    parser.add_argument(
+        "--arms-only-log", default="",
+        help="Write arms-only targets, actual wrists, joint/load/temperature data to JSONL",
+    )
+    parser.add_argument(
+        "--arms-max-gravity-nm", type=float, default=8.0,
+        help="Unloaded IK gravity-torque comfort budget (Nm); not a motor thermal rating",
+    )
     parser.add_argument("--buffer_size", type=int, default=15, help="Sliding window buffer size")
     parser.add_argument("--port", type=int, default=5556, help="ZMQ server port (default: 5556)")
     parser.add_argument(
@@ -2282,6 +2290,8 @@ if __name__ == "__main__":
             )
         if not 1 <= args.target_fps <= 100:
             parser.error("--arms-only --target_fps must be between 1 and 100")
+        if not np.isfinite(args.arms_max_gravity_nm) or args.arms_max_gravity_nm <= 0:
+            parser.error("--arms-max-gravity-nm must be positive and finite")
         from gear_sonic.utils.teleop.arms_only import run_arms_only_manager
 
         run_arms_only_manager(

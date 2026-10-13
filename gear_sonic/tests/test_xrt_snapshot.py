@@ -110,7 +110,13 @@ def test_deploy_publishes_measured_joints_before_start_only_when_fresh(tmp_path)
 #include <memory>
 #include <vector>
 using Clock = std::chrono::steady_clock;
-struct Motor { double value; double q() const { return value; } };
+struct Motor {
+    double value;
+    double q() const { return value; }
+    double dq() const { return .12; }
+    double tau_est() const { return 1.4; }
+    std::array<int, 2> temperature() const { return {30, 29}; }
+};
 struct State {
     std::array<Motor, 29> motors;
     const auto& motor_state() const { return motors; }
@@ -120,7 +126,14 @@ struct Buffer { Data value; Data GetDataWithTime() const { return value; } };
 struct Output {
     int calls = 0;
     std::array<double, 29> joints;
-    void publish_calibration_state(const std::array<double, 29>& q, double age) {
+    void publish_calibration_state(const std::array<double, 29>& q, double age,
+                                  const std::array<double, 58>& temperatures,
+                                  const std::array<double, 29>& torques,
+                                  const std::array<double, 29>& velocities) {
+        for (int i = 0; i < 29; ++i) {
+            assert(temperatures[i * 2] == 30 && temperatures[i * 2 + 1] == 29);
+            assert(torques[i] == 1.4 && velocities[i] == .12);
+        }
         assert(age >= 0 && age <= .05);
         joints = q; ++calls;
     }

@@ -6,6 +6,64 @@ or body calibration are used. SONIC still commands the whole robot, including
 legs and waist for balance. This is stationary manipulation intent, not a guarantee
 that the robot's feet, torso, or pelvis will remain motionless.
 
+## Comfort-filter update after the first hardware trials
+
+This revision replaces the latched 60 cm workspace freeze with a recoverable
+projection and enables a G1 kinematic target filter by default in `--arms-only`.
+Tracking loss/menu hold/source jumps still latch a hold and preserve stop controls.
+The filter changes the Cartesian wrist targets supplied to SONIC, never sends joint
+or torque commands, and never selects a different encoder.
+
+For an installation that already built the previous arms-only version, copy the
+updated Python files (including the **new** `arm_target_filter.py`) and the three
+updated C++ deployment files, then run:
+
+```bash
+cd "$HOME/GR00T-WholeBodyControl/gear_sonic_deploy"
+source scripts/setup_env.sh
+just build
+```
+
+The existing teleop environment already contains NumPy, SciPy, and Pinocchio. This
+revision does not change the XRoboToolkit binding and does not require rebuilding
+it again. Rebuild the C++ deployment to enable velocity, torque-estimate, and
+winding/driver temperature feedback, available before and during policy engagement.
+
+Run the same deployment command from your earlier trial. For the first replay,
+replace its final `real` with `sim` and start the MuJoCo simulator. In the streamer
+terminal, from the original repository root, capture both JSONL and terminal logs:
+
+```bash
+cd "$HOME/GR00T-WholeBodyControl"
+source .venv_teleop/bin/activate
+mkdir -p logs
+trial="$(date +%Y%m%d-%H%M%S)"
+python gear_sonic/scripts/pico_manager_thread_server.py \
+    --manager --arms-only --input-source xrt --target_fps 50 \
+    --zmq_feedback_host localhost --zmq_feedback_port 5557 \
+    --arms-only-log "logs/arms-only-$trial.jsonl" \
+    --arms-only-timing 2>&1 | tee "logs/arms-only-$trial.txt"
+```
+
+Repeat small axis translations and rotations, then slowly raise and lower one arm
+through the limiting region. Confirm that `held` remains false for geometric
+limiting and inward motion responds without a stick click. Verify the other arm,
+head-only motion, reanchor, menu hold, lost tracking, and both stop controls. Compare
+requested and outgoing wrists with actual measured FK, shoulder/elbow angles,
+joint margins, torque estimates, and temperatures. End a trial on overheating;
+a target hold does not unload the motors. This implementation does not add an
+automatic thermal recovery or override the existing deployment stop semantics.
+
+The JSONL log appends a metadata record per run and a target record per output
+sample. It contains incoming and accepted source timestamps, source receive and
+send times, requested/outgoing/actual wrists, position/rotation errors, hold/limit
+reasons, measured joints and velocities, estimated motor torques, both temperature
+readings, and projected/measured kinematic metrics. Missing/stale measured data is
+recorded as absent rather than zero. Default terminal diagnostics update once per
+second, including during holds. `processing_ms` covers input acquisition through
+send, including IK; JSONL analysis/FK/write work follows send and can affect the next
+cycle. Inspect consecutive `sent_mono` values for total observed scheduling delay.
+
 ## Setup and simulation startup
 
 Use the existing Linux teleop and deployment environments from
@@ -158,12 +216,46 @@ resume movement; left stick click explicitly reanchors. Source-clock resets requ
 recentering changes the tracking axes, stop and restart the manager to capture a new
 heading alignment; reanchor alone does not change the original alignment.
 
-The planner's VR target setter has no Cartesian reachability clamp. The new path
-rejects a per-sample wrist step above 10 cm / 45 degrees or displacement beyond
-60 cm from the initial measured wrist position, holding the last accepted targets.
-These are discontinuity/extent guards, **not** collision checking or a reachability
-solver. Existing SONIC motor and Dex3 protections remain unchanged. Large motion
-between samples can deliberately trigger hold. No extra smoothing/filter delay is added.
+A raw **controller** step above 10 cm / 45 degrees still latches hold, with the
+side, measured jump, and threshold logged explicitly. This is computed against the
+previous source sample, so a limited output cannot create a false tracking jump.
+
+The 60 cm radius about each initial measured wrist is now projected independently.
+Rejected translation/rotation is absorbed into the controller-to-target anchor, so
+blocked commands do not accumulate. Reversing the controller immediately moves the
+target inward even after a long outward motion. Consequently, returning a controller
+to its original physical position need not restore the original robot target after
+limiting; use the existing reanchor control to reposition the operator's hands.
+The operator axes and torso reference remain fixed.
+
+The default kinematic projection uses the real G1 URDF, the existing manipulation
+point offsets and Jacobians, and at most six damped IK iterations per arm. Wrist
+position has greater weight than orientation, allowing difficult orientations to
+relax. The redundant direction prefers lowered elbows and a comfortable bent-arm
+reference. Solver joint bounds reserve 0.08 rad from existing limits and prefer at
+least 0.25 rad elbow flexion. The projected elbow stays at most 2 cm above the
+shoulder; an initially elevated/out-of-envelope posture is grandfathered only while
+moving toward the envelope. Calibration itself does not snap the arms to a default
+pose. Projected per-sample changes are capped at 2 cm and 5 degrees. These caps are
+per sample, so the effective velocity cap depends on `--target_fps`.
+
+`--arms-max-gravity-nm` defaults to **8 Nm per arm joint** in the projection. This is
+an experimental **unloaded URDF comfort budget**, not a manufacturer continuous
+rating or a thermal guarantee. It excludes payloads, contacts and dynamics. An
+initial gravity estimate above the budget can be retained only without increasing
+that joint's estimate. The actual motor torque estimate is logged separately.
+
+The IK joint solution is internal feasibility evidence: **SONIC receives only
+wrist/torso targets and can choose a different elbow configuration.** Measured
+elbow height, joint-limit/comfort margins, gravity estimates, and smallest positional
+Jacobian singular values are logged to reveal that difference. Neither elbow-down
+posture on the actual robot, collision avoidance, global IK optimality, nor prevention
+of overheating is guaranteed. IK introduces bounded computation and target projection,
+so measure its processing cost and any resulting target correction/response delay.
+
+Fresh measured robot feedback is now required throughout active filtered teleop.
+Missing/stale feedback latches hold; fresh data and explicit reanchor are needed to
+resume. Geometric limiting remains recoverable without reanchor.
 
 **Stock XRoboToolkit does not publish controller optical tracking validity.**
 The checked [Unity acquisition source](https://github.com/XR-Robotics/XRoboToolkit-Unity-Client/blob/main/Assets/Scripts/TrackingData.cs)
@@ -181,8 +273,9 @@ occlusion/reconnection/recentering trials remain necessary to validate optical-l
 handling for hardware use. The mode does not fabricate such validity flags.
 
 Robot calibration feedback is a separate `g1_calibration` msgpack topic on the
-existing ZMQ output port. Deployment publishes raw motor joint angles in hardware/
-MuJoCo order after initialization, before and during policy execution, only if the
+existing ZMQ output port. Deployment publishes raw motor joint angles, velocities,
+torque estimates and winding/driver temperatures in hardware/MuJoCo order after
+initialization, before and during policy execution, only if the
 low-state sample is at most 50 ms old. Python requires finite 29-joint data and a
 receive age at most 250 ms. It never substitutes a zero vector. Local receive age
 cannot reveal an arbitrarily delayed network packet; inspect transport timing on
@@ -230,7 +323,7 @@ and policy transition behavior remain in place.
 ## Verification and implementation trace
 
 ```bash
-python -m pytest gear_sonic/tests/test_arms_only.py gear_sonic/tests/test_xrt_snapshot.py -q
+python -m pytest gear_sonic/tests/test_arms_only.py gear_sonic/tests/test_arm_target_filter.py gear_sonic/tests/test_xrt_snapshot.py -q
 ```
 
 The tests replay packets with no Body/Hand/ankle API, exercise the real manager loop
@@ -247,7 +340,7 @@ calibration (initially zero joints) → `PlannerStreamer` → planner message.
 POSE and visualization additionally perform full SMPL processing; mode transitions
 can return to those paths. The opt-in CLI selects `run_arms_only_manager` before any
 of those acquisitions or streamers are instantiated. It uses `PicoControllerReader`
-→ `ArmsOnlyTargets` → the unchanged planner message builder. Deployment's
+→ `ArmsOnlyTargets` → `G1ArmTargetFilter` → the unchanged planner message builder. Deployment's
 `ZMQCommandManager::OnPlannerReceived` still sets VR buffers, selects encoder 1,
 and feeds `GatherVR3PointPosition/Orientation` to the same whole-body policy.
 

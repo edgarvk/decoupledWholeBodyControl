@@ -3842,11 +3842,19 @@ class G1Deploy {
         const auto age = std::chrono::steady_clock::now() - measured.timestamp;
         if (measured.data && age <= LOW_STATE_LATE_THRESHOLD) {
           std::array<double, 29> q;
+          std::array<double, 29> torque, velocity;
+          std::array<double, 58> temperature;
           for (size_t i = 0; i < q.size(); ++i) {
-            q[i] = measured.data->motor_state()[i].q();
+            const auto& motor = measured.data->motor_state()[i];
+            q[i] = motor.q();
+            torque[i] = motor.tau_est();
+            velocity[i] = motor.dq();
+            temperature[i * 2] = motor.temperature()[0];
+            temperature[i * 2 + 1] = motor.temperature()[1];
           }
           for (auto& oi : output_interfaces_) {
-            if (oi) oi->publish_calibration_state(q, std::chrono::duration<double>(age).count());
+            if (oi) oi->publish_calibration_state(q, std::chrono::duration<double>(age).count(),
+                                                temperature, torque, velocity);
           }
         }
       }

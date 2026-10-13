@@ -326,6 +326,7 @@ def test_manager_workflow_with_no_body_api(monkeypatch):
     class Feedback:
         def __init__(self, *args):
             self.socket = Socket()
+            self.telemetry = {}
 
         def get(self, now):
             return np.full(29, 0.1)
@@ -352,6 +353,7 @@ def test_manager_workflow_with_no_body_api(monkeypatch):
     monkeypatch.setattr(time, "sleep", lambda *args: None)
     monkeypatch.setattr(arms_only, "MeasuredRobotFeedback", Feedback)
     monkeypatch.setattr(arms_only, "make_robot_fk", lambda: lambda q: robot_pose())
+    monkeypatch.setattr(arms_only, "make_target_filter", lambda budget: None)
     controls = iter([[True] * 4, [False] * 4, [True, False, True, False], [True] * 4])
     hand_calls = []
 
@@ -367,6 +369,8 @@ def test_manager_workflow_with_no_body_api(monkeypatch):
         zmq_feedback_port=5557,
         target_fps=50,
         arms_only_timing=False,
+        arms_only_log="",
+        arms_max_gravity_nm=8.0,
     )
     arms_only.run_arms_only_manager(
         args,
@@ -424,6 +428,7 @@ def test_cli_routes_opt_in_and_rejects_body_paths(monkeypatch, argv, expected):
         "get_abxy_buttons": None,
         "get_controller_inputs": None,
         "get_axis_clicks": None,
+        "np": np,
     }
     try:
         exec(compile(ast.Module(body=cli.body, type_ignores=[]), str(path), "exec"), namespace)
