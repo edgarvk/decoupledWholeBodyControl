@@ -98,6 +98,7 @@ Documentation
    tutorials/isaac_teleop_publisher_setup
    tutorials/vr_wholebody_teleop
    tutorials/arms_only_teleop
+   tutorials/pico_record_replay
    tutorials/live_camera_teleop
    tutorials/data_collection
    tutorials/vla_workflow

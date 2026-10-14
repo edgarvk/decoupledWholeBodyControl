@@ -34,6 +34,10 @@ MANIFEST
 pip-log.txt
 pip-delete-this-directory.txt
 
+# Raw teleoperation demonstrations and replay results
+/recordings/
+/logs/
+
 # Unit test / coverage reports
 htmlcov/
 .tox/

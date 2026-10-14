@@ -260,7 +260,7 @@ class MeasuredRobotFeedback:
 class ArmDiagnostics:
     """JSONL trial data plus one-second summaries, including while targets hold."""
 
-    def __init__(self, path=""):
+    def __init__(self, path="", context=None):
         self.file = None
         self.last_summary = -float("inf")
         self.warned_missing_telemetry = False
@@ -273,6 +273,7 @@ class ArmDiagnostics:
                     {
                         "type": "metadata",
                         "schema": "arms-only-diagnostics-v1",
+                        "context": context or {},
                         "run_started_unix_ns": time.time_ns(),
                         "units": "metres/radians/Nm/degrees-C",
                         "quaternion_order": "wxyz",
@@ -299,13 +300,19 @@ class ArmDiagnostics:
         value = np.asarray(packet.get(name, []), dtype=float)
         return value if value.shape == shape and np.all(np.isfinite(value)) else None
 
+    def event(self, name, payload):
+        if self.file is not None:
+            self.file.write(json.dumps({"type": "event", "event": name, **payload}) + "\n")
+            self.file.flush()
+
     def record(self, targets, sample, measured_q, telemetry, sent_mono, sent_unix_ns, processing_ms):
         summarize = sent_mono - self.last_summary >= 1.0
         if self.file is None and not summarize:
             return
         observation = {}
-        if measured_q is not None and targets.target_filter is not None:
-            observation = targets.target_filter.observe(measured_q, targets.target)
+        observer = getattr(targets, "diagnostics_observer", targets.target_filter)
+        if measured_q is not None and observer is not None:
+            observation = observer.observe(measured_q, targets.target)
         temperatures = self._array(telemetry, "motor_temperature", (58,))
         torques = self._array(telemetry, "motor_torque", (29,))
         velocities = self._array(telemetry, "body_dq_measured", (29,))
@@ -324,6 +331,7 @@ class ArmDiagnostics:
             "source_receive_mono": sample["timestamp_monotonic"] if sample else None,
             "sent_mono": sent_mono,
             "sent_unix_ns": sent_unix_ns,
+            "replay_elapsed_s": getattr(targets, "replay_elapsed_s", None),
             "feedback_timestamp_unix_ns": telemetry.get("timestamp_unix_ns"),
             "feedback_state_age_s": telemetry.get("state_age_s"),
             "processing_ms": processing_ms,
@@ -384,7 +392,10 @@ class ArmDiagnostics:
             self.file.close()
 
 
-def run_arms_only_manager(args, sdk, init_hands, compute_hands, read_buttons, read_inputs, read_clicks):
+def run_arms_only_manager(
+    args, sdk, init_hands, compute_hands, read_buttons, read_inputs, read_clicks,
+    *, replay_driver=None, target_mode="filtered",
+):
     """Dedicated acquisition/manager path: no SMPL startup, calibration or modes."""
     import subprocess
 
@@ -398,42 +409,98 @@ def run_arms_only_manager(args, sdk, init_hands, compute_hands, read_buttons, re
     )
 
     # Fail on unsupported SDK/model before opening the service or publisher.
-    reader = PicoControllerReader(sdk)
-    targets = ArmsOnlyTargets(
+    reader = (
+        PicoControllerReader(sdk, clock=replay_driver.input_clock)
+        if replay_driver else PicoControllerReader(sdk)
+    )
+    target_class = ArmsOnlyTargets
+    if target_mode == "direct":
+        if replay_driver is None:
+            raise ValueError("Direct comparison mapping is available only for simulation replay")
+        from gear_sonic.utils.teleop.demo_targets import DirectDemoTargets
+
+        target_class = DirectDemoTargets
+    elif target_mode != "filtered":
+        raise ValueError("Unknown target mapping")
+    targets = target_class(
         make_robot_fk(),
         [args.left_grip_offset, args.right_grip_offset],
-        make_target_filter(args.arms_max_gravity_nm),
+        make_target_filter(args.arms_max_gravity_nm) if target_mode == "filtered" else None,
     )
+    if replay_driver and target_mode == "direct":
+        targets.diagnostics_observer = make_target_filter(args.arms_max_gravity_nm)
     session = ArmsOnlySession(targets)
     solvers = init_hands()
     context = zmq.Context()
     socket = context.socket(zmq.PUB)
     socket.setsockopt(zmq.SNDHWM, 2)
-    socket.bind(f"tcp://*:{args.port}")
+    socket.bind(f"tcp://{'127.0.0.1' if replay_driver else '*'}:{args.port}")
     feedback = MeasuredRobotFeedback(context, args.zmq_feedback_host, args.zmq_feedback_port)
     last_hands = (None, None)
     previous_collection = previous_abort = False
     initialized = False
     started = False
-    diagnostics = ArmDiagnostics(args.arms_only_log)
+    diagnostics = ArmDiagnostics(args.arms_only_log, getattr(replay_driver, "configuration", None))
     logging.basicConfig(level=logging.INFO)
     try:
-        subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
+        if replay_driver is None:
+            subprocess.Popen(["bash", "/opt/apps/roboticsservice/runService.sh"])
         sdk.init()
         initialized = True
         print(
             "Arms-only: enable Head + Controller, disable Body/Motion tracking. "
             "A+B+X+Y=start/stop; left stick click=reanchor; left menu=hold; Ctrl-C=stop."
         )
+        waiting_since = time.monotonic()
+        checked_sim_at = -float("inf")
         while True:
             tick = time.monotonic()
+            measured_q = feedback.get(tick)
+            if replay_driver:
+                from gear_sonic.utils.teleop.pico_demo import require_local_simulation
+
+                if tick - checked_sim_at >= 1.0:
+                    require_local_simulation()
+                    checked_sim_at = tick
+                if replay_driver.started_at is None:
+                    if measured_q is None or tick - waiting_since < 0.5:
+                        if tick - waiting_since > 15:
+                            raise RuntimeError(
+                                "No fresh simulation joints on feedback port; enable --output-type zmq"
+                            )
+                        time.sleep(0.02)
+                        continue
+                    replay_driver.start()
+                    print("Replaying recorded input; initial calibration uses simulated measured joints.")
+                if not replay_driver.advance():
+                    print("Recording finished; stopping simulation replay.")
+                    break
+                targets.replay_elapsed_s = replay_driver.elapsed_s
             # Stop controls are read regardless of pose freshness or validity.
             buttons = read_buttons()
             menu, lt, rt, lg, rg = read_inputs()
             left_click, _ = read_clicks()
             sample = reader.get_latest()
-            measured_q = feedback.get(tick)
-            action, target = session.step(sample, measured_q, buttons, left_click, menu, time.monotonic())
+            input_now = time.monotonic()
+            if replay_driver:
+                buttons = replay_driver.buttons(sample, session)
+                input_now = replay_driver.input_clock()
+                if measured_q is None and session.active:
+                    targets.hold("Measured robot feedback missing/stale")
+            action, target = session.step(sample, measured_q, buttons, left_click, menu, input_now)
+            if action in ("start", "reanchor"):
+                diagnostics.event("calibration", {
+                    "action": action,
+                    "replay_elapsed_s": replay_driver.elapsed_s if replay_driver else None,
+                    "source_ns": targets.source_timestamp_ns,
+                    "measured_body_q": measured_q.tolist(),
+                    "headset_pose_xyzw": (
+                        sample["headset_pose"].tolist() if sample["headset_pose"] is not None else None
+                    ),
+                    "controller_poses_xyzw": sample["controller_poses"].tolist(),
+                    "frame": targets.frame.tolist(), "anchor_pose": targets.anchor.tolist(),
+                    "grip_offsets": targets.grip_offsets.tolist(),
+                })
             if action == "stop":
                 break
             if target is not None:
@@ -479,6 +546,8 @@ def run_arms_only_manager(args, sdk, init_hands, compute_hands, read_buttons, re
                     )
             collection = bool(buttons[0]) and lg > 0.5
             abort = bool(buttons[1]) and lg > 0.5
+            if replay_driver:
+                collection = abort = False
             socket.send(
                 pack_pose_message(
                     {
@@ -496,11 +565,14 @@ def run_arms_only_manager(args, sdk, init_hands, compute_hands, read_buttons, re
     finally:
         if started:
             # ZMQ PUB is best effort. Keep the independent deployment stop control.
-            socket.send(build_command_message(start=False, stop=True, planner=True))
-            time.sleep(0.05)
+            for _ in range(3 if replay_driver else 1):
+                socket.send(build_command_message(start=False, stop=True, planner=True))
+                time.sleep(0.05)
         if initialized:
             sdk.close()
         diagnostics.close()
         feedback.socket.close(linger=0)
         socket.close(linger=100)
         context.term()
+    if replay_driver and not started:
+        raise RuntimeError("No replay start occurred. Record A+B+X+Y in a neutral pose, or use --start-mode auto.")

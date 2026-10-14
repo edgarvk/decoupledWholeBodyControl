@@ -1,5 +1,8 @@
 # PICO arms-only teleoperation
 
+To capture headset/controller demonstrations once and reuse them through SONIC in
+MuJoCo, see [PICO recording and replay](pico_record_replay.md).
+
 `--manager --arms-only` maps direct PICO controller motion into SONIC's existing
 VR_3PT / TELEOP encoder. No ankle trackers, body-joint packets, SMPL reconstruction,
 or body calibration are used. SONIC still commands the whole robot, including
