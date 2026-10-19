@@ -4,7 +4,7 @@ VLA inference runner — NO ROS 2 DEPENDENCY.
 Runs an Isaac-GR00T VLA policy against the Sonic whole-body control stack.
 All communication uses ZMQ:
   1. Robot state  -> ZMQ SUB on ``g1_debug`` topic (from C++ zmq_output_handler)
-  2. Actions out  -> ZMQ PUB (latent protocol v4: motion token + hand joints)
+  2. Actions out  -> ZMQ PUB (SONIC latent v4 or stationary REAL_G1 planner targets)
   3. Camera       -> ZMQ/TCP via ComposedCameraClientSensor
   4. Keyboard     -> ZMQ SUB via ZMQKeyboardSubscriber
 
@@ -14,7 +14,7 @@ running PolicyServer.
 Keyboard commands (received via ZMQ from the standalone keyboard publisher):
   p  -> pause / resume the policy loop
   k  -> start / stop the C++ control loop
-  i  -> blend smoothly to initial pose (or snap if no prior token) and switch to POSE mode
+  i  -> SONIC: initial token in POSE mode; REAL_G1: hold posture in PLANNER mode
   t  -> change prompt at runtime (publisher sends ``prompt:<text>``)
   [  -> toggle left hand open/closed for initial pose
   ]  -> toggle right hand open/closed for initial pose
@@ -39,22 +39,18 @@ from gear_sonic.utils.data_collection.keyboard_subscriber import (
     ZMQKeyboardSubscriber,
 )
 from gear_sonic.utils.data_collection.telemetry import Telemetry
-from gear_sonic.utils.data_collection.transforms import compute_projected_gravity
 from gear_sonic.utils.data_collection.zmq_state_subscriber import ZMQStateSubscriber
+from gear_sonic.utils.inference.gr00t_adapter import Gr00tAdapter
 from gear_sonic.utils.inference.initial_poses import LATENT_INITIAL_MOTION_TOKEN
+from gear_sonic.utils.inference.rtc import RTCScheduler
 from gear_sonic.utils.inference.vla_utils import (
     calculate_latency_compensated_index,
-    concat_action,
-    prepare_observation_for_eval,
     should_trigger_new_inference,
 )
 from gear_sonic.utils.teleop.solver.hand.g1_gripper_ik_solver import (
     G1GripperInverseKinematicsSolver,
 )
-from gear_sonic.utils.teleop.zmq.zmq_planner_sender import (
-    build_command_message,
-    pack_pose_message,
-)
+from gear_sonic.utils.teleop.zmq.zmq_planner_sender import build_command_message, pack_pose_message
 
 
 @dataclass
@@ -73,10 +69,25 @@ class InferenceConfig:
     """Rate at which individual actions are published to the C++ control loop (Hz)."""
 
     action_horizon: int = 40
-    """Action horizon of the VLA policy (number of future actions per inference)."""
+    """Legacy horizon hint; the actual horizon is read from the policy server."""
 
     rate: float = 1 / 0.4
     """Rate at which we run the forward pass of the VLA policy (Hz)."""
+
+    rtc: bool = False
+    """Condition overlapping action chunks using the server's RTC implementation."""
+
+    rtc_overlap_steps: int = 20
+    """Replan when this many actions remain (expanded to cover measured latency)."""
+
+    rtc_initial_delay: float = 0.2
+    """Initial round-trip delay estimate (seconds), updated from subsequent calls."""
+
+    rtc_safety_steps: int = 2
+    """Additional frozen actions to cover control and transport jitter."""
+
+    rtc_ramp_rate: float = 5.0
+    """Exponential soft-overlap ramp strength."""
 
     # Camera
     camera_host: str = "localhost"
@@ -107,8 +118,14 @@ class InferenceConfig:
     """ZMQ port for keyboard input."""
 
     # Embodiment
-    embodiment_tag: str = "unitree_g1_sonic"
-    """Embodiment tag for policy inference."""
+    embodiment_tag: str = "auto"
+    """Infer the embodiment from the server, or check REAL_G1 / UNITREE_G1_SONIC."""
+
+    observation_rate: float = 50.0
+    """Checkpoint sampling rate (Hz): video [-20, 0] spans 0.4 s at 50 Hz."""
+
+    sensor_timeout: float = 1.0
+    """Maximum age (seconds) of camera and state observations."""
 
     # Prompt / eval
     prompt: str = "demo"
@@ -171,9 +188,7 @@ def pack_latent_action_message(
         left_hand_joints = np.asarray(left_hand_joints, dtype=np.float32)
         if left_hand_joints.ndim == 1:
             if left_hand_joints.shape[0] != 7:
-                raise ValueError(
-                    f"left_hand_joints must have shape [7], got {left_hand_joints.shape}"
-                )
+                raise ValueError(f"left_hand_joints must have shape [7], got {left_hand_joints.shape}")
             left_hand_joints = left_hand_joints.reshape(1, 7)
         pose_data["left_hand_joints"] = left_hand_joints
 
@@ -181,9 +196,7 @@ def pack_latent_action_message(
         right_hand_joints = np.asarray(right_hand_joints, dtype=np.float32)
         if right_hand_joints.ndim == 1:
             if right_hand_joints.shape[0] != 7:
-                raise ValueError(
-                    f"right_hand_joints must have shape [7], got {right_hand_joints.shape}"
-                )
+                raise ValueError(f"right_hand_joints must have shape [7], got {right_hand_joints.shape}")
             right_hand_joints = right_hand_joints.reshape(1, 7)
         pose_data["right_hand_joints"] = right_hand_joints
 
@@ -209,73 +222,7 @@ def get_action_field(action_dict: dict, key: str):
 # ---------------------------------------------------------------------------
 
 
-def prepare_observation_from_sensors(
-    camera_subscriber,
-    state_subscriber,
-    robot_model,
-    language_prompt: str,
-    log_errors: bool = False,
-):
-    """Read sensors and prepare observation for the VLA policy.
-
-    Returns:
-        observation dict, or None if sensor data not yet available.
-    """
-    camera_msg = camera_subscriber.read()
-    if camera_msg is None:
-        if log_errors:
-            print("[DEBUG] prepare_observation: waiting for camera msg..", flush=True)
-        return None
-
-    state_msg = state_subscriber.get_msg()
-    if state_msg is None:
-        if log_errors:
-            print("[DEBUG] prepare_observation: waiting for state msg..", flush=True)
-        return None
-
-    cam_img = camera_msg["images"]["ego_view"]
-
-    # Copy index finger data to middle finger (hardware coupling)
-    state_msg["left_hand_q"][5] = state_msg["left_hand_q"][3]
-    state_msg["left_hand_q"][6] = state_msg["left_hand_q"][4]
-
-    qpos = robot_model.get_configuration_from_actuated_joints(
-        body_actuated_joint_values=state_msg["body_q"],
-        left_hand_actuated_joint_values=state_msg["left_hand_q"],
-        right_hand_actuated_joint_values=state_msg["right_hand_q"],
-    )
-
-    video = {"ego_view": cam_img[np.newaxis, np.newaxis]}
-    if "left_wrist" in camera_msg["images"]:
-        video["left_wrist"] = camera_msg["images"]["left_wrist"][np.newaxis, np.newaxis]
-    if "right_wrist" in camera_msg["images"]:
-        video["wrist_view"] = camera_msg["images"]["right_wrist"][np.newaxis, np.newaxis]
-
-    observation = {
-        "video": video,
-        "state": {},
-        "language": {
-            "annotation.human.task_description": [[language_prompt]],
-        },
-        "q": np.asarray(qpos, dtype=np.float32)[np.newaxis, np.newaxis],
-        "timestamps": camera_msg["timestamps"]["ego_view"],
-    }
-
-    observation = prepare_observation_for_eval(robot_model, observation)
-
-    # Projected gravity for Sonic latent embodiment
-    assert "base_quat" in state_msg, "base_quat not found in state_msg"
-    base_quat = np.asarray(state_msg["base_quat"], dtype=np.float64)
-    assert base_quat.shape == (4,), "base_quat must have shape (4,)"
-    projected_gravity = compute_projected_gravity(base_quat)
-    observation["state"]["projected_gravity"] = np.asarray(
-        projected_gravity, dtype=np.float32
-    )[np.newaxis, np.newaxis]
-
-    return observation
-
-
-def run_policy_inference_and_process(policy, observation, robot_model):
+def run_policy_inference_and_process(policy, observation, adapter):
     """Run policy inference via Isaac-GR00T PolicyClient and process results.
 
     Returns:
@@ -284,20 +231,7 @@ def run_policy_inference_and_process(policy, observation, robot_model):
     try:
         action, _info = policy.get_action(observation)
 
-        action.pop("task_progress", None)
-        action.pop("action.task_progress", None)
-
-        motion_key = "motion_token" if "motion_token" in action else "action.motion_token"
-        if np.abs(action[motion_key]).max() > 1.25:
-            print(
-                f"[Warning] action['{motion_key}'] max "
-                f"({np.abs(action[motion_key]).max():.4f}) > 1.25. "
-                "Exceeds action bound, skipping."
-            )
-            return None
-
-        processed_action = concat_action(robot_model, action)
-        return processed_action
+        return adapter.process_action(action)
     except Exception as e:
         print(f"Error in inference: {e}")
         import traceback
@@ -326,7 +260,6 @@ def _inference_worker_loop(
             try:
                 observation = prepare_obs_fn()
                 if observation is None:
-                    print("[DEBUG] Worker thread: Observation is None, skipping", flush=True)
                     continue
 
                 inference_start_time = time.monotonic()
@@ -348,6 +281,35 @@ def _inference_worker_loop(
             import traceback
 
             traceback.print_exc()
+
+
+def _rtc_inference_worker_loop(
+    inference_queue,
+    result_queue,
+    stop_event,
+    busy_event,
+    prepare_obs_fn,
+    inference_fn,
+):
+    """Always return the request token, including failures and sensor warm-up."""
+    while not stop_event.is_set():
+        try:
+            request = inference_queue.get(timeout=0.1)
+        except queue.Empty:
+            continue
+        busy_event.set()
+        try:
+            observation = prepare_obs_fn()
+            if observation is None:
+                result = (request, None, {"error": "waiting for fresh sensor history"})
+            else:
+                action, info = inference_fn(observation, request)
+                result = (request, action, info)
+        except Exception as exc:
+            result = (request, None, {"error": str(exc)})
+        finally:
+            busy_event.clear()
+        result_queue.put(result)
 
 
 # ---------------------------------------------------------------------------
@@ -376,29 +338,57 @@ def main(config: InferenceConfig):
     if n1_policy.ping():
         print_green("PolicyServer is reachable.")
     else:
-        print("WARNING: PolicyServer not reachable. Inference will fail until server is up.")
+        raise RuntimeError("PolicyServer is not reachable; start it before the VLA client")
+
+    adapter = Gr00tAdapter(
+        robot_model,
+        n1_policy.get_modality_config(),
+        config.embodiment_tag,
+        config.observation_rate,
+        config.sensor_timeout,
+    )
+    config.action_horizon = adapter.action_horizon
+    rtc_scheduler = None
+    if config.rtc:
+        try:
+            capabilities = n1_policy.call_endpoint("get_capabilities", requires_input=False)
+        except RuntimeError as exc:
+            raise RuntimeError("RTC requires the updated Isaac-GR00T server; restart that server") from exc
+        if capabilities.get("rtc", {}).get("version") != 1:
+            raise RuntimeError("This policy server does not support RTC version 1")
+        rtc_scheduler = RTCScheduler(
+            adapter.action_horizon,
+            config.action_publish_rate,
+            config.rtc_overlap_steps,
+            config.rtc_initial_delay,
+            config.rtc_safety_steps,
+            config.rtc_ramp_rate,
+        )
+        print_green(
+            f"RTC enabled: overlap={rtc_scheduler.overlap_steps}, initial freeze={rtc_scheduler.freeze_steps}"
+        )
+    print_green(f"Server embodiment: {adapter.embodiment_tag}")
+    print(f"Video history: {adapter.video_deltas} at {config.observation_rate} Hz")
+    print(f"Action horizon from server: {adapter.action_horizon}")
+    if not adapter.is_latent:
+        print_green("REAL_G1 stationary control: arms, hands and waist; navigation/height disabled")
+        print("'i' holds the measured posture in PLANNER mode; 'p' applies VLA targets")
 
     state_subscriber = ZMQStateSubscriber(
         host=config.state_zmq_host,
         port=config.state_zmq_port,
     )
 
-    camera_subscriber = ComposedCameraClientSensor(
-        server_ip=config.camera_host, port=config.camera_port
-    )
+    camera_subscriber = ComposedCameraClientSensor(server_ip=config.camera_host, port=config.camera_port)
 
     zmq_context = zmq.Context()
     zmq_socket = zmq_context.socket(zmq.PUB)
     zmq_socket.bind(f"tcp://{config.action_zmq_host}:{config.action_zmq_port}")
     time.sleep(0.1)
-    print_green(
-        f"ZMQ action socket bound to tcp://{config.action_zmq_host}:{config.action_zmq_port}"
-    )
-    print_green(f"Using embodiment tag: {config.embodiment_tag}")
+    print_green(f"ZMQ action socket bound to tcp://{config.action_zmq_host}:{config.action_zmq_port}")
+    print_green(f"Using server embodiment: {adapter.embodiment_tag}")
 
-    keyboard_listener = ZMQKeyboardSubscriber(
-        port=config.keyboard_zmq_port, host=config.keyboard_zmq_host
-    )
+    keyboard_listener = ZMQKeyboardSubscriber(port=config.keyboard_zmq_port, host=config.keyboard_zmq_host)
 
     telemetry = Telemetry(window_size=100)
 
@@ -412,20 +402,27 @@ def main(config: InferenceConfig):
     # Track initial pose hand states
     initial_pose_left_hand_closed = False
     initial_pose_right_hand_closed = False
+    last_stationary_message = None
 
     def publish_initial_pose():
         """Publish initial pose command to move robot to starting position."""
+        nonlocal last_stationary_message
         print("Moving to initial pose")
         left_hand = (
-            _compute_closed_hand_joints("L")
-            if initial_pose_left_hand_closed
-            else np.zeros(7, dtype=np.float32)
+            _compute_closed_hand_joints("L") if initial_pose_left_hand_closed else np.zeros(7, dtype=np.float32)
         )
         right_hand = (
-            _compute_closed_hand_joints("R")
-            if initial_pose_right_hand_closed
-            else np.zeros(7, dtype=np.float32)
+            _compute_closed_hand_joints("R") if initial_pose_right_hand_closed else np.zeros(7, dtype=np.float32)
         )
+        if not adapter.is_latent:
+            try:
+                last_stationary_message = adapter.stationary_message(left_hand=left_hand, right_hand=right_hand)
+                zmq_socket.send(last_stationary_message)
+            except ValueError as exc:
+                print(f"Cannot initialize posture: {exc}")
+                return
+            print_green("Holding measured posture in stationary PLANNER mode")
+            return
         zmq_message = pack_latent_action_message(
             motion_token=LATENT_INITIAL_MOTION_TOKEN,
             frame_index=np.array([0], dtype=np.int64),
@@ -436,6 +433,12 @@ def main(config: InferenceConfig):
         print_green("Sent latent initial pose via ZMQ")
         time.sleep(1.0)
         print("Initial pose done.")
+
+    def maintain_stationary_posture():
+        # The planner releases upper-body overrides after one second without a
+        # message. Keep the last posture while paused or awaiting a new chunk.
+        if not adapter.is_latent and cpp_loop_running and last_stationary_message is not None:
+            zmq_socket.send(last_stationary_message)
 
     def blend_to_initial_pose(duration_s: float) -> bool:
         """Smoothly interpolate from the last sent motion token to the initial pose.
@@ -456,14 +459,10 @@ def main(config: InferenceConfig):
         step_period = 1.0 / config.action_publish_rate
 
         left_hand = (
-            _compute_closed_hand_joints("L")
-            if initial_pose_left_hand_closed
-            else np.zeros(7, dtype=np.float32)
+            _compute_closed_hand_joints("L") if initial_pose_left_hand_closed else np.zeros(7, dtype=np.float32)
         )
         right_hand = (
-            _compute_closed_hand_joints("R")
-            if initial_pose_right_hand_closed
-            else np.zeros(7, dtype=np.float32)
+            _compute_closed_hand_joints("R") if initial_pose_right_hand_closed else np.zeros(7, dtype=np.float32)
         )
 
         print(
@@ -474,9 +473,7 @@ def main(config: InferenceConfig):
         for step in range(num_steps):
             t_step_start = time.monotonic()
             alpha = (step + 1) / num_steps
-            blended_token = ((1.0 - alpha) * start_token + alpha * target_token).astype(
-                np.float32
-            )
+            blended_token = ((1.0 - alpha) * start_token + alpha * target_token).astype(np.float32)
             zmq_message = pack_latent_action_message(
                 motion_token=blended_token,
                 frame_index=np.array([0], dtype=np.int64),
@@ -537,10 +534,12 @@ def main(config: InferenceConfig):
             return
 
         if key.startswith(PROMPT_MSG_PREFIX):
-            new_prompt = key[len(PROMPT_MSG_PREFIX):]
+            new_prompt = key[len(PROMPT_MSG_PREFIX) :]
             if new_prompt:
                 old_prompt = language_prompt_ref[0]
                 language_prompt_ref[0] = new_prompt
+                if rtc_scheduler is not None:
+                    rtc_scheduler.reset()
                 print_green(f'Inference prompt changed: "{old_prompt}" -> "{new_prompt}"')
             else:
                 print("Received empty prompt change -- ignoring.")
@@ -553,11 +552,14 @@ def main(config: InferenceConfig):
         elif key == "f":
             print("Keyboard: 'f' (stop recording failure -- handled by data exporter)")
         elif key == "i":
-            if cpp_loop_running and cpp_mode == "PLANNER":
-                if send_cpp_control_command(start=True, planner=False):
-                    print("Switched to POSE mode (from PLANNER mode)")
+            if rtc_scheduler is not None:
+                rtc_scheduler.reset()
+            target_mode = "POSE" if adapter.is_latent else "PLANNER"
+            if cpp_loop_running and cpp_mode != target_mode:
+                if send_cpp_control_command(start=True, planner=not adapter.is_latent):
+                    print(f"Switched to {target_mode} mode")
                 else:
-                    print("Warning: Failed to switch to POSE mode")
+                    print(f"Warning: Failed to switch to {target_mode} mode")
             elif not cpp_loop_running:
                 print("Note: C++ loop not running - press 'k' to start")
 
@@ -572,6 +574,8 @@ def main(config: InferenceConfig):
             action_chunk_index = 0
             print("Cleared cached action chunk, reset frame counter")
         elif key == "p":
+            if rtc_scheduler is not None:
+                rtc_scheduler.reset()
             pause_loop = not pause_loop
             print(f"{'Paused' if pause_loop else 'Resumed'} policy loop")
             if pause_loop:
@@ -579,6 +583,8 @@ def main(config: InferenceConfig):
             else:
                 print("Policy loop resumed")
         elif key == "k":
+            if rtc_scheduler is not None:
+                rtc_scheduler.reset()
             if cpp_loop_running:
                 current_planner = cpp_mode == "PLANNER"
                 print(f"Stopping C++ control loop (from {cpp_mode} mode)...")
@@ -588,20 +594,15 @@ def main(config: InferenceConfig):
                 print("Starting C++ control loop in PLANNER mode...")
                 if send_cpp_control_command(start=True, planner=True):
                     print("Started C++ control loop in PLANNER mode")
-                    print("Press 'i' to send initial pose and switch to POSE mode")
+                    print("Press 'i' to initialize the posture, then 'p' to apply VLA actions")
                     if pause_loop:
                         print("Note: Policy loop is paused - press 'p' to resume")
         elif key == "[":
             initial_pose_left_hand_closed = not initial_pose_left_hand_closed
-            print(
-                f"Initial pose left hand: {'closed' if initial_pose_left_hand_closed else 'open'}"
-            )
+            print(f"Initial pose left hand: {'closed' if initial_pose_left_hand_closed else 'open'}")
         elif key == "]":
             initial_pose_right_hand_closed = not initial_pose_right_hand_closed
-            print(
-                f"Initial pose right hand: "
-                f"{'closed' if initial_pose_right_hand_closed else 'open'}"
-            )
+            print(f"Initial pose right hand: {'closed' if initial_pose_right_hand_closed else 'open'}")
 
     # Mutable prompt container (single-writer from keyboard, single-reader from inference)
     language_prompt_ref: list[str] = [config.prompt]
@@ -612,74 +613,104 @@ def main(config: InferenceConfig):
     inference_stop_event = threading.Event()
     inference_busy_event = threading.Event()
 
+    def rtc_inference(observation, request):
+        action, info = n1_policy.get_action(observation, options=request.options)
+        return adapter.process_action(action, retain_all=True), info
+
     inference_worker_thread = threading.Thread(
-        target=_inference_worker_loop,
+        target=_rtc_inference_worker_loop if config.rtc else _inference_worker_loop,
         args=(
             inference_queue,
             result_queue,
             inference_stop_event,
             inference_busy_event,
-            lambda: prepare_observation_from_sensors(
-                camera_subscriber=camera_subscriber,
-                state_subscriber=state_subscriber,
-                robot_model=robot_model,
-                language_prompt=language_prompt_ref[0],
-                log_errors=True,
-            ),
-            lambda obs: run_policy_inference_and_process(
+            lambda: adapter.prepare_observation(language_prompt_ref[0]),
+            rtc_inference
+            if config.rtc
+            else lambda obs: run_policy_inference_and_process(
                 policy=n1_policy,
                 observation=obs,
-                robot_model=robot_model,
+                adapter=adapter,
             ),
         ),
         daemon=True,
     )
     inference_worker_thread.start()
+    print("Waiting for fresh sensors and the checkpoint's video history...")
+    sensors_were_ready = False
 
     try:
         while True:
             t_start = time.monotonic()
+            # Drain sensors on every control tick, including while inference is busy.
+            # ZMQ sockets stay on this thread; only immutable snapshots reach the worker.
+            adapter.update(camera_subscriber.read(), state_subscriber.get_msg())
             check_keyboard_input()
 
-            # Consume result first so last_inference_time is fresh before trigger check
-            try:
-                processed_action, inference_start_time = result_queue.get_nowait()
-                inference_delay = time.monotonic() - inference_start_time
-                action_chunk_index = calculate_latency_compensated_index(
-                    inference_delay, config.action_publish_rate, config.action_horizon
-                )
-                cached_action_chunk = processed_action
-                last_inference_time = time.monotonic()
-                print_green(
-                    f'New action chunk (prompt: "{language_prompt_ref[0]}", '
-                    f"latency: {inference_delay:.3f}s)"
-                )
-            except queue.Empty:
-                pass
-
-            worker_is_busy = inference_busy_event.is_set()
-            should_start = should_trigger_new_inference(
-                cached_chunk_exists=(cached_action_chunk is not None),
-                inference_thread_running=worker_is_busy,
-                time_since_last_inference=(time.monotonic() - last_inference_time),
-                inference_interval=inference_interval,
-            )
-
-            if should_start:
+            sensors_ready = adapter.sensors_ready()
+            if rtc_scheduler is not None:
+                if sensors_were_ready and not sensors_ready:
+                    rtc_scheduler.reset()
                 try:
-                    inference_queue.put_nowait(None)
-                except queue.Full:
+                    request, action, info = result_queue.get_nowait()
+                    if rtc_scheduler.finish(request, action, info):
+                        print_green(
+                            f"RTC chunk: latency={rtc_scheduler.last_latency:.3f}s, "
+                            f"overlap={0 if request.prefix is None else next(iter(request.prefix.values())).shape[1]}, "
+                            f"frozen={request.frozen_steps}, "
+                            f"overrun={rtc_scheduler.last_overrun_steps} steps"
+                        )
+                    else:
+                        print(f"RTC: {rtc_scheduler.last_status}")
+                except queue.Empty:
+                    pass
+                if sensors_ready and rtc_scheduler.can_request():
+                    inference_queue.put_nowait(rtc_scheduler.start_request())
+                current = rtc_scheduler.current()
+                cached_action_chunk, action_chunk_index = current if current else (None, 0)
+            else:
+                # Consume result first so last_inference_time is fresh before trigger check
+                try:
+                    processed_action, inference_start_time = result_queue.get_nowait()
+                    inference_delay = time.monotonic() - inference_start_time
+                    action_chunk_index = calculate_latency_compensated_index(
+                        inference_delay, config.action_publish_rate, config.action_horizon
+                    )
+                    cached_action_chunk = processed_action
+                    last_inference_time = time.monotonic()
+                    print_green(
+                        f'New action chunk (prompt: "{language_prompt_ref[0]}", latency: {inference_delay:.3f}s)'
+                    )
+                except queue.Empty:
                     pass
 
+                worker_is_busy = inference_busy_event.is_set()
+                should_start = should_trigger_new_inference(
+                    cached_chunk_exists=(cached_action_chunk is not None),
+                    inference_thread_running=worker_is_busy,
+                    time_since_last_inference=(time.monotonic() - last_inference_time),
+                    inference_interval=inference_interval,
+                )
+
+                if should_start:
+                    try:
+                        inference_queue.put_nowait(None)
+                    except queue.Full:
+                        pass
+
+            sensors_were_ready = sensors_ready
+            if not sensors_ready:
+                _sleep_remaining(t_start, loop_period)
+                continue
+
             if pause_loop:
-                print("Pausing...", end="", flush=True)
-                time.sleep(0.2)
-                print(".", end="", flush=True)
+                maintain_stationary_posture()
+                _sleep_remaining(t_start, loop_period)
                 continue
 
             with telemetry.timer("total_loop"):
                 if cached_action_chunk is None:
-                    print("[DEBUG] No cached chunk yet, waiting...", flush=True)
+                    maintain_stationary_posture()
                     _sleep_remaining(t_start, loop_period)
                     continue
 
@@ -688,66 +719,38 @@ def main(config: InferenceConfig):
                 if processed_action is None or not processed_action:
                     print("[DEBUG] processed_action is None or empty, skipping", flush=True)
                 else:
-                    motion_token = np.asarray(
-                        get_action_field(processed_action, "motion_token"),
-                        dtype=np.float32,
-                    )
-                    left_hand_joints = np.asarray(
-                        get_action_field(processed_action, "left_hand_joints"),
-                        dtype=np.float32,
-                    )
-                    right_hand_joints = np.asarray(
-                        get_action_field(processed_action, "right_hand_joints"),
-                        dtype=np.float32,
-                    )
-
-                    # Action arrays arrive as (B, T, D) from the model.
-                    # Squeeze batch dim to get (T, D), then index by time step.
-                    if motion_token.ndim == 3:
-                        motion_token = motion_token[0]
-                    if left_hand_joints.ndim == 3:
-                        left_hand_joints = left_hand_joints[0]
-                    if right_hand_joints.ndim == 3:
-                        right_hand_joints = right_hand_joints[0]
-
-                    horizon = motion_token.shape[0] if motion_token.ndim == 2 else 1
-                    current_idx = min(action_chunk_index, horizon - 1)
-
-                    if motion_token.ndim == 2:
-                        motion_token = motion_token[current_idx]
-                    if left_hand_joints.ndim == 2:
-                        left_hand_joints = left_hand_joints[current_idx]
-                    if right_hand_joints.ndim == 2:
-                        right_hand_joints = right_hand_joints[current_idx]
-
+                    current_idx = min(action_chunk_index, adapter.action_horizon - 1)
                     frame_index = np.array([zmq_frame_counter], dtype=np.int64)
-                    zmq_frame_counter += 1
-
-                    zmq_message = pack_latent_action_message(
-                        motion_token,
-                        frame_index,
-                        left_hand_joints=left_hand_joints,
-                        right_hand_joints=right_hand_joints,
-                    )
-                    zmq_socket.send(zmq_message)
-                    last_sent_motion_token = motion_token.copy()
-                    if zmq_frame_counter % 50 == 0:
-                        print_green(
-                            f"ZMQ: Sent latent action - "
-                            f"frame: {frame_index[0]}, "
-                            f"token shape: {motion_token.shape}"
+                    if adapter.is_latent:
+                        motion_token = processed_action["motion_token"][0, current_idx]
+                        zmq_message = pack_latent_action_message(
+                            motion_token,
+                            frame_index,
+                            left_hand_joints=processed_action["left_hand_joints"][0, current_idx],
+                            right_hand_joints=processed_action["right_hand_joints"][0, current_idx],
                         )
+                        last_sent_motion_token = motion_token.copy()
+                    else:
+                        zmq_message = adapter.stationary_message(processed_action, current_idx)
+                        last_stationary_message = zmq_message
+                    zmq_socket.send(zmq_message)
+                    zmq_frame_counter += 1
+                    if zmq_frame_counter % 50 == 0:
+                        print_green(f"ZMQ: Sent {adapter.embodiment_tag} action - frame: {frame_index[0]}")
 
-                action_chunk_index = min(action_chunk_index + 1, config.action_horizon - 1)
+                if rtc_scheduler is not None:
+                    rtc_scheduler.advance()
+                else:
+                    action_chunk_index += 1
+                    if action_chunk_index >= adapter.action_horizon:
+                        cached_action_chunk = None
 
             end_time = time.monotonic()
 
             if config.verbose_timing:
                 telemetry.log_timing_info(context="VLA Inference Loop", threshold=0.0)
             elif (end_time - t_start) > (1 / config.rate):
-                telemetry.log_timing_info(
-                    context="VLA Inference Loop Missed", threshold=0.001
-                )
+                telemetry.log_timing_info(context="VLA Inference Loop Missed", threshold=0.001)
 
             _sleep_remaining(t_start, loop_period)
 
@@ -760,6 +763,7 @@ def main(config: InferenceConfig):
         zmq_socket.close()
         zmq_context.term()
         state_subscriber.close()
+        camera_subscriber.close()
         keyboard_listener.close()
         print("Shutdown complete.")
 

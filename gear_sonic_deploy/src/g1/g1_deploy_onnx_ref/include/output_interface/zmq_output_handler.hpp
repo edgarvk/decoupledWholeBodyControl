@@ -153,6 +153,35 @@ public:
         type_ = OutputType::ZMQ;
     }
 
+    /// Pre-start calibration feedback, separate from policy/visualization output.
+    void publish_calibration_state(const std::array<double, 29>& measured_q,
+                                   double state_age_s,
+                                   const std::array<double, 58>& temperatures,
+                                   const std::array<double, 29>& torques,
+                                   const std::array<double, 29>& velocities) override {
+        msgpack::sbuffer buffer;
+        msgpack::packer<msgpack::sbuffer> pk(&buffer);
+        pk.pack_map(6);
+        pk.pack("body_q_measured");
+        pk.pack_array(measured_q.size());
+        for (const auto& q : measured_q) pk.pack(q);
+        pk.pack("state_age_s");
+        pk.pack(state_age_s);
+        pk.pack("motor_temperature");
+        pk.pack_array(temperatures.size());
+        for (const auto& value : temperatures) pk.pack(value);
+        pk.pack("motor_torque");
+        pk.pack_array(torques.size());
+        for (const auto& value : torques) pk.pack(value);
+        pk.pack("body_dq_measured");
+        pk.pack_array(velocities.size());
+        for (const auto& value : velocities) pk.pack(value);
+        pk.pack("timestamp_unix_ns");
+        pk.pack(std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::system_clock::now().time_since_epoch()).count());
+        send_zmq_message("g1_calibration", buffer);
+    }
+
     /**
      * @brief Send combined visualisation + state-logger data in a single ZMQ message (non-blocking, called each tick).
      *

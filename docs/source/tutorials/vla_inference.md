@@ -54,6 +54,64 @@ uv run python gr00t/eval/run_gr00t_server.py \
     --port 5550
 ```
 
+### Base model with REAL_G1 (stationary upper-body control)
+
+The base `nvidia/GR00T-N1.7-3B` checkpoint supports `REAL_G1`. This is a
+different observation/action schema from a finetuned `UNITREE_G1_SONIC` policy:
+it needs temporal camera history and wrist poses, and returns absolute joint
+targets after the server decodes the actions.
+
+Start the **base model** server in the Isaac-GR00T repository:
+
+```bash
+uv run python gr00t/eval/run_gr00t_server.py \
+    --model-path nvidia/GR00T-N1.7-3B \
+    --embodiment-tag REAL_G1 \
+    --device cuda:0 \
+    --port 5550
+```
+
+Then launch the client from GR00T-WholeBodyControl:
+
+```bash
+python gear_sonic/scripts/launch_inference.py \
+    --embodiment-tag REAL_G1 \
+    --policy-port 5550 \
+    --camera-host 192.168.123.164 \
+    --observation-rate 50 \
+    --prompt "raise your arms"
+```
+
+The client queries the server's modality configuration at startup. The default
+`--embodiment-tag auto` also detects either schema; specifying `REAL_G1` checks
+that the server uses the expected format. It derives the action horizon from
+the server instead of assuming a fixed chunk size.
+
+Camera capture continues while inference runs. Video indices `[-20, 0]` select
+images separated by 0.4 seconds at `--observation-rate 50`; this rate defines
+the checkpoint's temporal sampling interval and is independent of inference
+frequency. Match it to the dataset sampling rate if using another checkpoint.
+Startup waits for enough actual camera history. Wrist poses are computed from
+the measured robot configuration in the pelvis frame, using GR00T's rotation
+6D convention (the first two rows of the rotation matrix).
+
+For `REAL_G1`, the client publishes **stationary planner commands**: IDLE mode,
+zero movement, fixed facing, and absolute arm, hand and waist targets in the
+controller's joint order. Navigation and base-height predictions are omitted.
+The SONIC planner/controller manages standing balance; the VLA does not directly
+command leg motors. This adapter uses the model's joint predictions rather than
+its redundant wrist-pose action predictions.
+
+The client starts paused. In the keyboard pane, `k` starts the C++ controller,
+`i` holds the measured upper-body posture while staying in PLANNER mode, and
+`p` enables publishing the predicted targets. For a latent SONIC policy, `i`
+retains the existing initial-token and POSE-mode behavior.
+
+The client checks tensor shapes, finite values and joint limits, and suspends
+publishing when camera or state data is stale. Offline tests validate FK,
+temporal sampling and the controller packet format; tracking and task success
+still need evaluation in simulation and on the target robot.
+
 ### 2. Inference Environment
 
 On the inference machine (can be the same as the PolicyServer or a separate PC):
@@ -158,6 +216,65 @@ python gear_sonic/scripts/launch_inference.py \
 The Python launcher starts the same C++ deploy command in a tmux pane, then runs
 the Python VLA inference client, keyboard publisher, and optional data exporter.
 
+## Real-Time Chunking (RTC)
+
+Restart the PolicyServer using the matching updated Isaac-GR00T checkout, then
+enable RTC in the client. For the base model and stationary REAL_G1 adapter:
+
+```bash
+python gear_sonic/scripts/launch_inference.py \
+    --embodiment-tag REAL_G1 \
+    --policy-port 5550 \
+    --camera-host 192.168.123.164 \
+    --prompt "raise your arms" \
+    --rtc
+```
+
+The client first checks the server's RTC capability/version. Enabling the flag
+against an older server fails explicitly rather than silently running ordinary
+asynchronous inference. The same scheduler also supports latent SONIC action
+schemas; a compatible checkpoint is still required for those schemas.
+
+The initial prediction starts at step zero after it arrives. Later requests
+include the remaining absolute actions of the current chunk, including all
+configured model output groups. The server converts them to its normalized
+representation relative to the new measured state, freezes committed steps
+and conditions the soft-overlap region using the native action-head primitive.
+REAL_G1 joint limits are applied before forming the next prefix, so RTC sees
+the same bounded motor targets that are sent to the controller. The server
+restores frozen physical targets exactly after bfloat16 decoding.
+
+The client anchors each response to its request's control step. While waiting,
+it continues executing the previous trajectory. On arrival it skips exactly
+the steps already published, and validates the server acknowledgement and
+frozen targets. Prompt changes, pause/resume, initialization, stop/start and
+sensor discontinuities invalidate older responses. A single worker serializes
+policy requests. Exhausted chunks hold the last posture instead of being
+replayed.
+
+Defaults for the 40-step base checkpoint at 50 Hz:
+
+| Option | Default | Meaning |
+|---|---:|---|
+| `--rtc-overlap-steps` | 20 | Request another chunk when this many actions remain. |
+| `--rtc-initial-delay` | 0.2 | Initial round-trip delay estimate in seconds. |
+| `--rtc-safety-steps` | 2 | Extra frozen steps for control/transport jitter. |
+| `--rtc-ramp-rate` | 5.0 | Native exponential soft-overlap ramp strength. |
+
+The freeze estimate adapts to the maximum of the last eight conditioned-call
+latencies; the overlap grows if needed, bounded by the model horizon. Startup
+model warm-up is not used as a steady-state delay estimate. Logs report
+`RTC chunk: latency=..., overlap=..., frozen=..., overrun=... steps`.
+Repeated overruns or holds indicate that the available prediction horizon and
+inference throughput cannot sustain the configured control rate. RTC does not
+make an arbitrarily slow model real-time.
+
+Leaving out `--rtc` retains ordinary asynchronous inference. The REAL_G1
+stationary restriction remains unchanged: navigation and height predictions
+are not sent to the controller. Offline tests cover relative-state prefix
+conversion, frozen-step preservation, delayed execution, resets and packet
+mapping; physical tracking and task understanding still require robot tests.
+
 ## Action Space
 
 The Sonic embodiment (`unitree_g1_sonic`) uses a 78-dimensional action
@@ -173,15 +290,22 @@ python gear_sonic/scripts/launch_inference.py \
     --prompt "pick up the apple" \
     --camera-host 192.168.123.164
 
-# Simulation
+# Simulation: base model + REAL_G1 + RTC (local MuJoCo camera)
 python gear_sonic/scripts/launch_inference.py --sim \
-    --prompt "pick up the apple"
+    --embodiment-tag REAL_G1 --policy-port 5550 \
+    --camera-host 127.0.0.1 --prompt "raise your arms" --rtc
 
 # Without data recording
 python gear_sonic/scripts/launch_inference.py \
     --no-data-exporter \
     --prompt "pick up the apple"
 ```
+
+Simulation uses camera port **5559** by default; hardware retains **5555**.
+An explicit `--camera-port` is forwarded to the simulator, VLA client and exporter.
+If a camera port is occupied, the simulator reports the publishing failure instead
+of silently continuing without images. Restart the simulator after fixing it.
+The default scene has no manipulation objects; start with posture prompts.
 
 The launcher creates a tmux session with four panes:
 

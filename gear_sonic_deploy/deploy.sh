@@ -515,6 +515,18 @@ set +e  # Temporarily allow errors (for jetson_clocks on non-Jetson systems)
 source scripts/setup_env.sh
 set -e  # Re-enable exit on error
 
+# Unitree SDK ships a matched CycloneDDS C/C++ pair.
+# ROS2 setup may put another libddsc.so ahead of it in LD_LIBRARY_PATH,
+# which causes an ABI mismatch and heap corruption during ChannelFactory init.
+if [[ "$(uname -m)" == "x86_64" ]]; then
+    UNITREE_DDS_DIR="$SCRIPT_DIR/thirdparty/unitree_sdk2/thirdparty/lib/x86_64"
+
+    if [[ -d "$UNITREE_DDS_DIR" ]]; then
+        export LD_LIBRARY_PATH="$UNITREE_DDS_DIR:${LD_LIBRARY_PATH:-}"
+        echo "✅ Unitree bundled CycloneDDS prioritized"
+    fi
+fi
+
 # Always build to ensure we have the latest version
 echo "Building the project..."
 just build

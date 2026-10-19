@@ -66,6 +66,12 @@ public:
     /// Virtual destructor for correct polymorphic cleanup.
     virtual ~OutputInterface() = default;
 
+    /// Read-only joint feedback for calibration before policy engagement.
+    /// Hardware/MuJoCo order, absolute radians; no commands or reference poses.
+    virtual void publish_calibration_state(
+        const std::array<double, 29>&, double, const std::array<double, 58>&,
+        const std::array<double, 29>&, const std::array<double, 29>&) {}
+
     /**
      * @brief Publish the current robot state and target data.
      *

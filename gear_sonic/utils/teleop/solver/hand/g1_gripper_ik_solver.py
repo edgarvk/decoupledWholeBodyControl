@@ -158,10 +158,10 @@ class G1GripperInverseKinematicsSolver(Solver):
         q_desired[1] += amp
         q_desired[2] += amp
 
-        ampA1 = 0.6
-        ampB1 = 1.5
-        ampA2 = 1.5
-        ampB2 = 1.5
+        ampA1 = 0.8
+        ampB1 = 1.8
+        ampA2 = 1.8
+        ampB2 = 1.8
 
         q_desired[3] -= ampA1
         q_desired[4] -= ampB1

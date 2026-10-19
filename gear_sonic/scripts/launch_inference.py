@@ -32,13 +32,13 @@ Usage (from repo root — no venv activation needed):
     python gear_sonic/scripts/launch_inference.py --no-data-exporter     # no recording pane
 """
 
+import base64
 from dataclasses import dataclass
-from pathlib import Path
 import os
+from pathlib import Path
 import shutil
 import signal
 import socket
-import base64
 import subprocess
 import sys
 import textwrap
@@ -49,6 +49,7 @@ def _bootstrap_venv():
     """Re-exec with the .venv_inference Python if tyro is not available."""
     try:
         import tyro  # noqa: F401
+
         return
     except ImportError:
         pass
@@ -68,7 +69,7 @@ def _bootstrap_venv():
 
 _bootstrap_venv()
 
-import tyro
+import tyro  # noqa: E402 - the environment bootstrap must run first
 
 
 def _get_local_ip() -> str:
@@ -126,8 +127,11 @@ class InferenceLaunchConfig:
     policy_port: int = 5550
     """Isaac-GR00T PolicyServer port."""
 
-    embodiment_tag: str = "unitree_g1_sonic"
-    """Embodiment tag for policy inference."""
+    embodiment_tag: str = "auto"
+    """Detect the server embodiment, or check REAL_G1 / UNITREE_G1_SONIC."""
+
+    observation_rate: float = 50.0
+    """Checkpoint temporal sampling rate (Hz), independent of inference frequency."""
 
     prompt: str = "demo"
     """Language prompt for inference."""
@@ -138,12 +142,27 @@ class InferenceLaunchConfig:
     action_horizon: int = 40
     """Action horizon of the VLA policy."""
 
+    rtc: bool = False
+    """Enable RTC (requires the matching updated Isaac-GR00T server)."""
+
+    rtc_overlap_steps: int = 20
+    """Desired overlap, expanded automatically to cover measured inference delay."""
+
+    rtc_initial_delay: float = 0.2
+    """Initial inference delay estimate (seconds)."""
+
+    rtc_safety_steps: int = 2
+    """Extra frozen steps for scheduling jitter."""
+
+    rtc_ramp_rate: float = 5.0
+    """Soft-overlap exponential ramp strength."""
+
     # Camera
     camera_host: str = "localhost"
     """Camera server host."""
 
-    camera_port: int = 5555
-    """Camera server port."""
+    camera_port: int | None = None
+    """Camera server port; defaults to 5559 in simulation and 5555 on hardware."""
 
     # Data exporter (optional recording during inference)
     data_exporter: bool = True
@@ -157,6 +176,10 @@ class InferenceLaunchConfig:
 
     dataset_name: str = ""
     """Dataset name for the data exporter. Leave empty to auto-generate."""
+
+    def __post_init__(self):
+        if self.camera_port is None:
+            self.camera_port = 5559 if self.sim else 5555
 
 
 SESSION_NAME = "sonic_inference"
@@ -172,15 +195,12 @@ def _check_prerequisites(config: InferenceLaunchConfig):
     repo_root = Path(__file__).resolve().parent.parent.parent
 
     if not (repo_root / ".venv_inference" / "bin" / "activate").exists():
-        errors.append(
-            ".venv_inference not found. Run: bash install_scripts/install_inference.sh"
-        )
+        errors.append(".venv_inference not found. Run: bash install_scripts/install_inference.sh")
 
     deploy_dir = repo_root / "gear_sonic_deploy"
     if not (deploy_dir / "deploy.sh").exists():
         errors.append(
-            f"gear_sonic_deploy/deploy.sh not found at {deploy_dir}. "
-            "Ensure the deploy directory is set up."
+            f"gear_sonic_deploy/deploy.sh not found at {deploy_dir}. Ensure the deploy directory is set up."
         )
 
     if config.data_exporter:
@@ -191,9 +211,7 @@ def _check_prerequisites(config: InferenceLaunchConfig):
             )
 
     if config.sim and not (repo_root / ".venv_sim" / "bin" / "activate").exists():
-        errors.append(
-            ".venv_sim not found. Set up the simulation venv first."
-        )
+        errors.append(".venv_sim not found. Set up the simulation venv first.")
 
     if errors:
         print("ERROR: Prerequisites not met:\n")
@@ -390,12 +408,21 @@ def main(config: InferenceLaunchConfig):
         f"--host {config.policy_host} "
         f"--port {config.policy_port} "
         f"--embodiment-tag {config.embodiment_tag} "
+        f"--observation-rate {config.observation_rate} "
         f"--prompt '{config.prompt}' "
         f"--action-publish-rate {config.action_publish_rate} "
         f"--action-horizon {config.action_horizon} "
         f"--camera-host {config.camera_host} "
         f"--camera-port {config.camera_port}"
     )
+
+    if config.rtc:
+        inference_cmd += (
+            f" --rtc --rtc-overlap-steps {config.rtc_overlap_steps}"
+            f" --rtc-initial-delay {config.rtc_initial_delay}"
+            f" --rtc-safety-steps {config.rtc_safety_steps}"
+            f" --rtc-ramp-rate {config.rtc_ramp_rate}"
+        )
 
     print("Starting VLA inference (pane 1)...")
     _send_to_pane(2, inference_cmd, wait=1.0)

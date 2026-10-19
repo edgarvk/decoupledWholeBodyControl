@@ -339,8 +339,8 @@ class SimLoopConfig(BaseConfig):
     enable_image_publish: bool = False
     """Enable image publishing in simulation"""
 
-    camera_port: int = 5555
-    """Camera port for image publishing"""
+    camera_port: int = 5559
+    """Simulation camera port, separate from the hardware camera on 5555."""
 
     verbose: bool = False
     """Verbose output, override the base config verbose"""

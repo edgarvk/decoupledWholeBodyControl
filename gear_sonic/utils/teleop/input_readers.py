@@ -1,9 +1,11 @@
-"""Input source readers for body tracking data.
+"""Input source readers for direct controllers and body tracking data.
 
 PicoReader         -- pulls data from XRoboToolkit SDK (Pico headset).
+PicoControllerReader -- atomic direct controller packets, no body tracking.
 IsaacTeleopReader  -- in-process IsaacTeleop / CloudXR DeviceIO session.
 """
 
+import json
 import logging
 import threading
 import time
@@ -22,6 +24,82 @@ try:
     from gear_sonic.utils.teleop.isaac_teleop_client import IsaacTeleopClient
 except ImportError:
     IsaacTeleopClient = None
+
+
+class PicoControllerReader:
+    """Read the newest atomic direct-controller packet; never request a skeleton.
+
+    Requires the bundled snapshot binding. Legacy pose getters cannot distinguish
+    an omitted controller from a retained old pose. Optical validity is unavailable
+    in the stock Unity payload; hand ``isActive`` is NOT controller validity.
+    """
+
+    STALE_TIMEOUT = 0.25
+
+    def __init__(self, sdk=None, clock=time.monotonic):
+        self.sdk = sdk if sdk is not None else xrt
+        if not callable(getattr(self.sdk, "get_controller_snapshot", None)):
+            raise RuntimeError("Rebuild bundled xrobotoolkit_sdk: get_controller_snapshot is required")
+        self.clock = clock
+        self._stamp = None
+        self._changed_at = -float("inf")
+        self.error = "Waiting for controller data"
+
+    @staticmethod
+    def pose(device):
+        # Optional explicit validity extension to the Unity packet schema.
+        # Stock XRoboToolkit does not send these fields; never infer them from
+        # hand isActive or from whether a controller happens to be motionless.
+        if device.get("isTracked") is False:
+            raise ValueError("Device reports tracking lost")
+        if "trackingState" in device and int(device["trackingState"]) & 3 != 3:
+            raise ValueError("Device lacks position/orientation tracking")
+        pose = np.asarray([float(v) for v in device["pose"].split(",")])
+        if pose.shape != (7,) or not np.all(np.isfinite(pose)):
+            raise ValueError("Malformed controller/headset pose")
+        norm = np.linalg.norm(pose[3:])
+        if not 0.95 <= norm <= 1.05:
+            raise ValueError("Invalid tracking quaternion")
+        pose[3:] /= norm
+        return pose
+
+    def get_latest(self):
+        try:
+            packet = json.loads(self.sdk.get_controller_snapshot())
+            now = self.clock()
+            stamp = int(packet["timeStampNs"])
+            if stamp <= 0:
+                raise ValueError("Missing source timestamp")
+            if self._stamp is not None and stamp < self._stamp:
+                self._stamp = stamp
+                raise ValueError("Source clock reset; recalibrate")
+            if stamp != self._stamp:
+                self._stamp, self._changed_at = stamp, now
+            age = max(float(packet["receive_age_s"]), now - self._changed_at)
+            if not np.isfinite(age) or not 0 <= age <= self.STALE_TIMEOUT:
+                raise ValueError("Stale controller packet")
+            if packet.get("appState", {}).get("focus") is False:
+                raise ValueError("Headset application lost focus")
+            controllers = packet["Controller"]
+            poses = np.stack([self.pose(controllers[side]) for side in ("left", "right")])
+            # Head is optional after calibration and cannot affect streaming targets.
+            head = None
+            if "Head" in packet:
+                try:
+                    head = self.pose(packet["Head"])
+                except (KeyError, ValueError, TypeError, AttributeError, OverflowError):
+                    pass
+            self.error = ""
+            return {
+                "controller_poses": poses,
+                "headset_pose": head,
+                "timestamp_ns": stamp,
+                "timestamp_monotonic": now - age,
+                "controllers": controllers,
+            }
+        except (KeyError, ValueError, TypeError, AttributeError, OverflowError, RuntimeError) as exc:
+            self.error = str(exc)
+            return None
 
 
 class PicoReader:
@@ -489,5 +567,3 @@ class IsaacTeleopReader:
                 last_report = now
 
             time.sleep(self._period)
-
-
