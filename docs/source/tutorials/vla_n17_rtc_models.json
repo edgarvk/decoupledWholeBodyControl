@@ -1,0 +1,21 @@
+{
+  "vla_model": "nvidia/GR00T-N1.7-3B",
+  "vla_revision": "2fc962b973bccdd5d8ce4f67cc63b264d6886495",
+  "controller_models": [
+    {
+      "path": "gear_sonic_deploy/policy/release/model_decoder.onnx",
+      "size": 40900688,
+      "sha256": "c7241a123eaa36b5d64bad19540efde93cac1ad443bd4572fd12ca99898118ed"
+    },
+    {
+      "path": "gear_sonic_deploy/policy/release/model_encoder.onnx",
+      "size": 50100513,
+      "sha256": "013ab0287236aa2721e13f1e936d699db982302d0de0bfcdae76d5c3245362d3"
+    },
+    {
+      "path": "gear_sonic_deploy/planner/target_vel/V2/planner_sonic.onnx",
+      "size": 773952989,
+      "sha256": "39b553e197f62f077975ba38512bc04781a3fc37c2af7c6756e04629f760edea"
+    }
+  ]
+}

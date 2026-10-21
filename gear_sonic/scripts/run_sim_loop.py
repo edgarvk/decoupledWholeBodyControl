@@ -23,7 +23,7 @@ class SimWrapper:
         self.robot_model = robot_model
         self.config = config
 
-        init_channel(config=self.config)
+        #init_channel(config=self.config)
 
         # Create simulator using factory
         self.sim = SimulatorFactory.create_simulator(
@@ -49,7 +49,7 @@ def main(config: ArgsConfig):
         robot_model=robot_model,
         env_name=config.env_name,
         config=wbc_config,
-        onscreen=wbc_config.get("ENABLE_ONSCREEN", True),
+        onscreen=wbc_config.get("ENABLE_ONSCREEN", False),
         offscreen=wbc_config.get("ENABLE_OFFSCREEN", False),
         enable_image_publish=config.enable_image_publish,
     )

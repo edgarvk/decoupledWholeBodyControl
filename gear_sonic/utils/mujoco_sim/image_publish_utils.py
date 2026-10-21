@@ -43,6 +43,7 @@ class ImagePublishProcess:
 
         self.stop_event = self.mp_context.Event()
         self.data_ready_event = self.mp_context.Event()
+        self.started_event = self.mp_context.Event()
 
         self.stop_event.clear()
         self.data_ready_event.clear()
@@ -72,9 +73,24 @@ class ImagePublishProcess:
                 self.stop_event,
                 self.data_ready_event,
                 self.verbose,
+                self.started_event,
             ),
         )
         self.process.start()
+        # Do not leave a running physics loop with a dead camera subprocess.
+        deadline = time.monotonic() + 10.0
+        while not self.started_event.wait(timeout=0.1):
+            if not self.process.is_alive():
+                exitcode = self.process.exitcode
+                self.stop()
+                raise RuntimeError(
+                    f"Simulation camera failed to start on port {self.zmq_port} "
+                    f"(publisher exit code {exitcode}). Check the traceback above; "
+                    "if the port is occupied, select another --camera-port."
+                )
+            if time.monotonic() >= deadline:
+                self.stop()
+                raise TimeoutError(f"Simulation camera startup timed out on port {self.zmq_port}")
 
     def update_shared_memory(self, render_caches: Dict[str, np.ndarray]):
         """Update shared memory with new rendered images"""
@@ -124,26 +140,25 @@ class ImagePublishProcess:
 
     @staticmethod
     def _image_publish_worker(
-        shared_memory_info, image_dt, zmq_port, stop_event, data_ready_event, verbose
+        shared_memory_info, image_dt, zmq_port, stop_event, data_ready_event, verbose, started_event=None
     ):
         """Worker function that runs in the subprocess"""
+        shm_blocks = {}
+        sensor_server = None
         try:
             sensor_server = SensorServer()
             sensor_server.start_server(port=zmq_port)
 
             shared_arrays = {}
-            shm_blocks = {}
             for camera_name, info in shared_memory_info.items():
                 shm = shared_memory.SharedMemory(name=info["name"])
                 shm_blocks[camera_name] = shm
-                shared_arrays[camera_name] = np.ndarray(
-                    info["shape"], dtype=info["dtype"], buffer=shm.buf
-                )
+                shared_arrays[camera_name] = np.ndarray(info["shape"], dtype=info["dtype"], buffer=shm.buf)
 
-            print(
-                f"Image publishing subprocess started with {len(shared_arrays)} cameras "
-                f"on ZMQ port {zmq_port}"
-            )
+            if started_event is not None:
+                started_event.set()
+
+            print(f"Image publishing subprocess started with {len(shared_arrays)} cameras on ZMQ port {zmq_port}")
 
             loop_count = 0
             last_data_time = time.time()
@@ -196,6 +211,7 @@ class ImagePublishProcess:
             try:
                 for shm in shm_blocks.values():
                     shm.close()
-                sensor_server.stop_server()
+                if sensor_server is not None:
+                    sensor_server.stop_server()
             except Exception as e:
                 print(f"Error during subprocess cleanup: {e}")
