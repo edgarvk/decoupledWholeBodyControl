@@ -94,21 +94,21 @@ class G1GripperInverseKinematicsSolver(Solver):
     def _get_index_close_q_desired(self):
         q_desired = np.zeros(7)
 
-        amp0 = 0.5
+        amp0 = 0.6
         if self.side == "L":
             q_desired[0] -= amp0
         else:
             q_desired[0] += amp0
 
-        amp = 0.7
+        amp = 0.8
 
         q_desired[1] += amp
         q_desired[2] += amp
 
-        ampA1 = 1.5
-        ampB1 = 1.5
-        ampA2 = 0.6
-        ampB2 = 1.5
+        ampA1 = 1.8
+        ampB1 = 1.8
+        ampA2 = 0.8
+        ampB2 = 1.8
 
         q_desired[3] -= ampA1
         q_desired[4] -= ampB1
@@ -127,15 +127,15 @@ class G1GripperInverseKinematicsSolver(Solver):
         else:
             q_desired[0] += amp0
 
-        amp = 0.7
+        amp = 0.8
 
         q_desired[1] += amp
         q_desired[2] += amp
 
-        ampA1 = 1.0
-        ampB1 = 1.5
-        ampA2 = 1.0
-        ampB2 = 1.5
+        ampA1 = 1.5
+        ampB1 = 1.8
+        ampA2 = 1.5
+        ampB2 = 1.8
 
         q_desired[3] -= ampA1
         q_desired[4] -= ampB1
@@ -147,13 +147,13 @@ class G1GripperInverseKinematicsSolver(Solver):
     def _get_ring_close_q_desired(self):
         q_desired = np.zeros(7)
 
-        amp0 = -0.5
+        amp0 = -0.6
         if self.side == "L":
             q_desired[0] -= amp0
         else:
             q_desired[0] += amp0
 
-        amp = 0.7
+        amp = 0.8
 
         q_desired[1] += amp
         q_desired[2] += amp
