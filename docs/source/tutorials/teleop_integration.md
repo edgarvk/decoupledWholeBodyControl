@@ -4,6 +4,9 @@ This branch combines the saved feature branches while preserving their histories
 It is an integration candidate, not a validated hardware release. `rc1` means
 release candidate 1; further fixes produce rc2, rc3, and so on.
 
+For launch commands and comparisons, follow the
+[step-by-step simulation tutorial](teleop_integration_simulation.md).
+
 ## Source inventory
 
 | Source | Saved commit | Contribution |

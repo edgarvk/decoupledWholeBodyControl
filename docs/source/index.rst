@@ -100,6 +100,7 @@ Documentation
    tutorials/arms_only_teleop
    tutorials/pico_record_replay
    tutorials/teleop_integration
+   tutorials/teleop_integration_simulation
    tutorials/live_camera_teleop
    tutorials/data_collection
    tutorials/vla_workflow
