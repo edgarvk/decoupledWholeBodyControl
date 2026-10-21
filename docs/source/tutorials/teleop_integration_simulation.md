@@ -5,15 +5,16 @@ environment, deployment dependencies, G1 assets, and SONIC checkpoint installed.
 It tests live teleoperation and recorded input through MuJoCo and SONIC.
 GR00T N1.7 inference requires a separate test with its paired server.
 
-The examples use `~/GR00T-WholeBodyControl`, including its existing
-`.venv_teleop`. If your working installation is in `~/decoupledWholeBodyControl`,
-substitute that folder throughout. Run all three terminals on the same PC.
-Stop existing simulator and controller processes before starting.
+The examples use your personal repository at `~/decoupledWholeBodyControl`,
+with its Python environment, dependencies, and policy assets already available.
+This is not a fresh-install tutorial. Run all three terminals on the same PC.
+Stop existing simulator and controller processes before starting. These commands
+do not switch branches or modify files in a separate official repository checkout.
 
 ## 1. Select the integration branch
 
 ```bash
-cd "$HOME/GR00T-WholeBodyControl"
+cd "$HOME/decoupledWholeBodyControl"
 git status --short
 ```
 
@@ -53,7 +54,7 @@ introduced in commit `1ec3f1d`, after the `teleop-integration-v1-rc1` tag.
 ## 2. Terminal 1: start MuJoCo
 
 ```bash
-cd "$HOME/GR00T-WholeBodyControl/gear_sonic_deploy"
+cd "$HOME/decoupledWholeBodyControl/gear_sonic_deploy"
 source scripts/setup_env.sh
 
 cd ..
@@ -66,7 +67,7 @@ Keep this terminal running. The default scene is the tracked `scene_43dof.xml`.
 ## 3. Terminal 2: start the SONIC controller
 
 ```bash
-cd "$HOME/GR00T-WholeBodyControl/gear_sonic_deploy"
+cd "$HOME/decoupledWholeBodyControl/gear_sonic_deploy"
 
 ./deploy.sh \
     --cp policy/sonic_v1_1/model \
@@ -88,7 +89,7 @@ If startup fails with a DDS library assertion, inspect resolution in another
 terminal:
 
 ```bash
-cd "$HOME/GR00T-WholeBodyControl/gear_sonic_deploy"
+cd "$HOME/decoupledWholeBodyControl/gear_sonic_deploy"
 source scripts/setup_env.sh
 ldd target/release/g1_deploy_onnx_ref | grep -E 'libddsc|libddscxx'
 ```
@@ -109,7 +110,7 @@ XRoboToolkit service as in your existing setup. The manager launches the service
 through `/opt/apps/roboticsservice/runService.sh`.
 
 ```bash
-cd "$HOME/GR00T-WholeBodyControl"
+cd "$HOME/decoupledWholeBodyControl"
 source .venv_teleop/bin/activate
 
 python -m gear_sonic.scripts.pico_manager_thread_server \
@@ -132,7 +133,7 @@ No headset or XRoboToolkit service is needed for replay. Replace the input path
 with your recording filename:
 
 ```bash
-cd "$HOME/GR00T-WholeBodyControl"
+cd "$HOME/decoupledWholeBodyControl"
 source .venv_teleop/bin/activate
 
 python -m gear_sonic.scripts.pico_demo replay \
