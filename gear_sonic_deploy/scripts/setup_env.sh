@@ -337,6 +337,10 @@ check_command just
 check_command git
 
 echo ""
+# ROS/CUDA setup above can prepend a conflicting CycloneDDS C library. Select
+# the bundled matched pair last, including when this script is sourced directly.
+source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/configure_unitree_dds.sh" || return 1
+
 echo "🎉 Environment setup complete!"
 echo ""
 echo "📝 You can now run:"
