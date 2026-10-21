@@ -157,3 +157,19 @@ server, physical robot or Linux DDS runtime is used by these tests.
 The next required lab checks are the actual Linux DDS library/publishing check,
 full MuJoCo policy replay and paired N1.7 inference. The existing target-filter
 drift and shutdown incident remain separate unresolved behavior issues.
+
+Result: **107 focused tests passed** on the final integration source tree. To
+repeat them in a Python environment with the client/test dependencies and G1 assets:
+
+```bash
+python -m pytest -q \
+    gear_sonic/tests/test_teleop_integration.py \
+    gear_sonic/tests/test_gr00t_adapter.py \
+    gear_sonic/tests/test_rtc.py \
+    gear_sonic/tests/test_rtc_runner.py \
+    gear_sonic/tests/test_sim_camera_startup.py \
+    gear_sonic/tests/test_arms_only.py \
+    gear_sonic/tests/test_arm_target_filter.py \
+    gear_sonic/tests/test_xrt_snapshot.py \
+    gear_sonic/tests/test_pico_demo.py
+```
