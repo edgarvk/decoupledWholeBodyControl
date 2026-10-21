@@ -98,6 +98,10 @@ except ImportError:
     get_g1_key_frame_poses = None
 
 
+MIRROR_TELEOP = False
+TELEOP_GRIPPER_PROFILE = "legacy"
+
+
 class LocomotionMode(IntEnum):
     """Locomotion mode enum for robot movement."""
 
@@ -490,27 +494,10 @@ def process_smpl_joints(body_pose, global_orient, transl):
 
 
 def generate_finger_data(hand: str, trigger: float, grip: float) -> np.ndarray:
-    """
-    Generate finger position data from Pico controller button states.
+    from gear_sonic.utils.teleop.hand_controls import generate_finger_data as generate
 
-    Args:
-        hand: "left" or "right"
-        trigger: Trigger button value (0-1)
-        grip: Grip button value (0-1)
+    return generate(hand, trigger, grip, TELEOP_GRIPPER_PROFILE)
 
-    Returns:
-        Array of shape [25, 4, 4] representing fingertip positions
-    """
-    fingertips = np.zeros([25, 4, 4])
-
-    thumb = 0
-    middle = 10
-    # Control thumb based on shoulder button state (index 4 is thumb tip)
-    fingertips[4 + thumb, 0, 3] = 1.0  # open thumb
-    if trigger > 0.5:
-        fingertips[4 + middle, 0, 3] = 1.0  # close middle
-
-    return fingertips
 
 
 # Joystick deadzone threshold
@@ -558,7 +545,7 @@ class YawAccumulator:
         return self.heading
 
 
-def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndarray):
+def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndarray, mirror_arm_sides=False):
     """
     Compute local joints and body orientation from provided body_poses_np.
     """
@@ -568,6 +555,10 @@ def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndar
     # Convert to local rotations
     global_rots = sRot.from_quat(global_quats, scalar_first=True)
     global_rots = global_rots * sRot.from_euler("y", 180, degrees=True)
+    if mirror_arm_sides:
+        from gear_sonic.utils.teleop.mirroring import mirror_body_rotations
+
+        global_rots = mirror_body_rotations(global_rots)
 
     local_rots = []
     for i in range(24):
@@ -596,15 +587,15 @@ def compute_from_body_poses(parent_indices: list, device, body_poses_np: np.ndar
 #     return compute_from_body_poses(parent_indices, device, body_poses_np)
 
 
-def init_hand_ik_solvers():
-    """Initialize hand IK solvers if available."""
+def init_hand_ik_solvers(profile=None):
     if G1GripperInverseKinematicsSolver is not None:
-        left_solver = G1GripperInverseKinematicsSolver(side="left")
-        right_solver = G1GripperInverseKinematicsSolver(side="right")
-        print("Hand IK solvers initialized")
-        return left_solver, right_solver
-    print("Warning: Hand IK solvers not available")
+        profile = TELEOP_GRIPPER_PROFILE if profile is None else profile
+        return (
+            G1GripperInverseKinematicsSolver(side="left", profile=profile),
+            G1GripperInverseKinematicsSolver(side="right", profile=profile),
+        )
     return None, None
+
 
 
 # Readers that expose `get_controller_data()` returning the IsaacTeleop
@@ -756,8 +747,10 @@ def compute_hand_joints_from_inputs(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Compute left/right hand joints using IK solvers, or zeros if unavailable."""
     if left_solver is not None and right_solver is not None:
-        left_finger_data = generate_finger_data("left", left_trigger, left_grip)
-        right_finger_data = generate_finger_data("right", right_trigger, right_grip)
+        from gear_sonic.utils.teleop.hand_controls import generate_finger_data as generate
+
+        left_finger_data = generate("left", left_trigger, left_grip, left_solver.profile)
+        right_finger_data = generate("right", right_trigger, right_grip, right_solver.profile)
         left_hand_joints = left_solver({"position": left_finger_data})
         right_hand_joints = right_solver({"position": right_finger_data})
     else:
@@ -1346,7 +1339,8 @@ class PoseStreamer:
             return
 
         latest_data = compute_from_body_poses(
-            self.parent_indices, self.device, sample["body_poses_np"]
+            self.parent_indices, self.device, sample["body_poses_np"],
+            mirror_arm_sides=MIRROR_TELEOP,
         )
         left_menu_button, left_trigger, right_trigger, left_grip, right_grip = get_controller_inputs(
             self.reader
@@ -1369,10 +1363,10 @@ class PoseStreamer:
         left_hand_joints, right_hand_joints = compute_hand_joints_from_inputs(
             self.left_hand_ik_solver,
             self.right_hand_ik_solver,
-            left_trigger,
-            left_grip,
-            right_trigger,
-            right_grip,
+            right_trigger if MIRROR_TELEOP else left_trigger,
+            right_grip if MIRROR_TELEOP else left_grip,
+            left_trigger if MIRROR_TELEOP else right_trigger,
+            left_grip if MIRROR_TELEOP else right_grip,
         )
         smpl_pose_np = (
             latest_data["smpl_pose"].detach().cpu().numpy()[:, :63].reshape(-1, 21, 3)[0]
@@ -1538,6 +1532,10 @@ class PoseStreamer:
                 ),
             }
 
+            if MIRROR_TELEOP:
+                from gear_sonic.utils.teleop.mirroring import mirror_pose_message_outputs
+
+                numpy_data = mirror_pose_message_outputs(numpy_data)
             packed_message = pack_pose_message(numpy_data, topic="pose")
             self.socket.send(packed_message)
 
@@ -1860,13 +1858,19 @@ class PlannerStreamer:
                 lh_joints, rh_joints = compute_hand_joints_from_inputs(
                     self.left_hand_ik_solver,
                     self.right_hand_ik_solver,
-                    left_trigger,
-                    left_grip,
-                    right_trigger,
-                    right_grip,
+                    right_trigger if MIRROR_TELEOP else left_trigger,
+                    right_grip if MIRROR_TELEOP else left_grip,
+                    left_trigger if MIRROR_TELEOP else right_trigger,
+                    left_grip if MIRROR_TELEOP else right_grip,
                 )
                 left_hand_position = lh_joints.reshape(-1).astype(np.float32).tolist()
                 right_hand_position = rh_joints.reshape(-1).astype(np.float32).tolist()
+
+            if MIRROR_TELEOP:
+                from gear_sonic.utils.teleop.mirroring import mirror_flat_vr_targets, swap_lr_flat_targets
+
+                vr_3pt_position, vr_3pt_orientation = mirror_flat_vr_targets(vr_3pt_position, vr_3pt_orientation)
+                vr_3pt_compliance = swap_lr_flat_targets(vr_3pt_compliance, 1)
 
             msg = build_planner_message(
                 mode_to_send.value,
@@ -2275,7 +2279,13 @@ if __name__ == "__main__":
             "'isaac-teleop' for in-process IsaacTeleop / CloudXR DeviceIO"
         ),
     )
+    parser.add_argument("--mirror", action="store_true", help="Mirror operator arms and hand routing")
+    parser.add_argument("--gripper-profile", choices=("legacy", "rtc", "intern"), default="legacy")
     args = parser.parse_args()
+    MIRROR_TELEOP = args.mirror
+    TELEOP_GRIPPER_PROFILE = args.gripper_profile
+    if args.mirror and not args.manager:
+        parser.error("--mirror requires --manager")
 
     if args.arms_only:
         if not args.manager or args.input_source != "xrt":

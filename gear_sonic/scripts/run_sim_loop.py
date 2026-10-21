@@ -8,7 +8,7 @@ from typing import Dict
 
 import tyro
 
-from gear_sonic.utils.mujoco_sim.simulator_factory import SimulatorFactory, init_channel
+from gear_sonic.utils.mujoco_sim.simulator_factory import SimulatorFactory
 from gear_sonic.utils.mujoco_sim.configs import SimLoopConfig
 from gear_sonic.data.robot_model.instantiation.g1 import (
     instantiate_g1_robot_model,
@@ -23,7 +23,7 @@ class SimWrapper:
         self.robot_model = robot_model
         self.config = config
 
-        #init_channel(config=self.config)
+        # BaseSimulator owns DDS initialization; this wrapper must not repeat it.
 
         # Create simulator using factory
         self.sim = SimulatorFactory.create_simulator(
@@ -35,6 +35,13 @@ class SimWrapper:
 
 def main(config: ArgsConfig):
     wbc_config = config.load_wbc_yaml()
+    if config.robot_scene is not None:
+        from pathlib import Path
+
+        scene = Path(config.robot_scene).expanduser().resolve()
+        if not scene.is_file():
+            raise ValueError(f"Simulation scene not found: {scene}")
+        wbc_config["ROBOT_SCENE"] = str(scene)
     # NOTE: we will override the interface to local if it is not specified
     wbc_config["ENV_NAME"] = config.env_name
 
@@ -49,11 +56,11 @@ def main(config: ArgsConfig):
         robot_model=robot_model,
         env_name=config.env_name,
         config=wbc_config,
-        onscreen=wbc_config.get("ENABLE_ONSCREEN", False),
+        onscreen=wbc_config.get("ENABLE_ONSCREEN", True),
         offscreen=wbc_config.get("ENABLE_OFFSCREEN", False),
         enable_image_publish=config.enable_image_publish,
     )
-    # Start simulator as independent process
+    # Run the simulator loop and optional camera publisher.
     SimulatorFactory.start_simulator(
         sim_wrapper.sim,
         as_thread=False,

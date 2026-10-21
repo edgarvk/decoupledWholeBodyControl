@@ -183,6 +183,13 @@ class TestRTCRunner(unittest.TestCase):
 
         output = io.StringIO()
         with contextlib.ExitStack() as stack:
+            # These tests fake the RPC transport; installing a multi-GB policy
+            # server stack is not needed to exercise the actual client loop.
+            stack.enter_context(patch.dict(sys.modules, {
+                "gr00t": SimpleNamespace(),
+                "gr00t.policy": SimpleNamespace(),
+                "gr00t.policy.server_client": SimpleNamespace(PolicyClient=Client),
+            }))
             stack.enter_context(patch("gr00t.policy.server_client.PolicyClient", Client))
             for target, attr, value in (
                 (runner, "instantiate_g1_robot_model", lambda **kw: robot),

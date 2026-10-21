@@ -333,6 +333,9 @@ class BaseConfig(ArgsConfigTemplate):
 class SimLoopConfig(BaseConfig):
     """Config for running the simulation loop."""
 
+    robot_scene: Optional[str] = None
+    """Optional task scene XML; the default tracked scene is used otherwise."""
+
     mp_start_method: str = "spawn"
     """Multiprocessing start method"""
 

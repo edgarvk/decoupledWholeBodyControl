@@ -108,6 +108,8 @@ def replay(args):
         "recorded_code": driver.metadata.get("code"),
         "replay_code": code_version(),
         "mapping": args.mapping,
+        "mirror": args.mirror,
+        "gripper_profile": args.gripper_profile,
         "speed": args.speed,
         "target_fps": args.target_fps,
         "start_mode": args.start_mode,
@@ -124,6 +126,8 @@ def replay(args):
     from gear_sonic.utils.teleop.arms_only import run_arms_only_manager
 
     manager_args = SimpleNamespace(
+        mirror=args.mirror,
+        gripper_profile=args.gripper_profile,
         left_grip_offset=args.left_grip_offset,
         right_grip_offset=args.right_grip_offset,
         arms_max_gravity_nm=args.arms_max_gravity_nm,
@@ -137,7 +141,7 @@ def replay(args):
     run_arms_only_manager(
         manager_args,
         driver,
-        init_hand_ik_solvers,
+        lambda: init_hand_ik_solvers(profile=args.gripper_profile),
         compute_hand_joints_from_inputs,
         lambda: packet_controls(driver.packet)[0],
         lambda: packet_controls(driver.packet)[1],
@@ -174,6 +178,7 @@ def preview(args):
         make_robot_fk(),
         [args.left_grip_offset, args.right_grip_offset],
         make_target_filter(args.arms_max_gravity_nm) if args.mapping == "filtered" else None,
+        mirror=args.mirror,
     )
     session = ArmsOnlySession(targets)
     output = Path(args.output).expanduser()
@@ -187,6 +192,8 @@ def preview(args):
                     "schema": "pico-target-preview-v1",
                     "policy_executed": False,
                     "mapping": args.mapping,
+                    "mirror": args.mirror,
+                    "gripper_profile": args.gripper_profile,
                     "input_sha256": driver.file_sha256,
                     "initial_body_q": q.tolist(),
                     "code": code_version(),
@@ -297,6 +304,8 @@ def main():
     pre.add_argument("--initial-joints", required=True)
     pre.set_defaults(func=preview)
     for command in (rep, pre):
+        command.add_argument("--mirror", action="store_true")
+        command.add_argument("--gripper-profile", choices=("legacy", "rtc", "intern"), default="legacy")
         command.add_argument("--mapping", choices=("filtered", "direct"), default="filtered")
         command.add_argument("--start-mode", choices=("buttons", "auto"), default="buttons")
         command.add_argument("--arms-max-gravity-nm", type=float, default=8)

@@ -320,7 +320,7 @@ def _rtc_inference_worker_loop(
 def _compute_closed_hand_joints(side: str) -> np.ndarray:
     """Compute closed hand joint positions using G1GripperInverseKinematicsSolver."""
     side_str = "left" if side.upper() == "L" else "right"
-    solver = G1GripperInverseKinematicsSolver(side=side_str)
+    solver = G1GripperInverseKinematicsSolver(side=side_str, profile="rtc")
     return solver._get_middle_close_q_desired().astype(np.float32)
 
 

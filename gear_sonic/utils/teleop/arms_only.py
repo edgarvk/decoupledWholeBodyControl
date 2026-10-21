@@ -26,8 +26,9 @@ class ArmsOnlyTargets:
     MAX_STEP_RAD = np.deg2rad(45)
     MAX_EXCURSION_M = 0.60
 
-    def __init__(self, fk, grip_offsets=None, target_filter=None):
+    def __init__(self, fk, grip_offsets=None, target_filter=None, mirror=False):
         self.fk = fk
+        self.mirror = bool(mirror)
         self.target_filter = target_filter
         self.requested_pose = None
         self.limit_status = ["", ""]
@@ -50,7 +51,13 @@ class ArmsOnlyTargets:
         # Optional physical grip-to-command-point lever arm, in controller-local
         # tracking axes. Default zero: grip centre commands the robot key point.
         positions = poses[:, :3] + rotations.apply(self.grip_offsets)
-        return (positions @ self.frame.T, R.from_matrix(self.frame @ rotations.as_matrix() @ XRT_TO_ROBOT.T))
+        positions = positions @ self.frame.T
+        rotations = R.from_matrix(self.frame @ rotations.as_matrix() @ XRT_TO_ROBOT.T)
+        if self.mirror:
+            from gear_sonic.utils.teleop.mirroring import mirror_controller_targets
+
+            positions, rotations = mirror_controller_targets(positions, rotations)
+        return positions, rotations
 
     def calibrate(self, sample, measured_q, now=None):
         now = time.monotonic() if now is None else now
@@ -426,6 +433,7 @@ def run_arms_only_manager(
         make_robot_fk(),
         [args.left_grip_offset, args.right_grip_offset],
         make_target_filter(args.arms_max_gravity_nm) if target_mode == "filtered" else None,
+        mirror=getattr(args, "mirror", False),
     )
     if replay_driver and target_mode == "direct":
         targets.diagnostics_observer = make_target_filter(args.arms_max_gravity_nm)
@@ -500,6 +508,8 @@ def run_arms_only_manager(
                     "controller_poses_xyzw": sample["controller_poses"].tolist(),
                     "frame": targets.frame.tolist(), "anchor_pose": targets.anchor.tolist(),
                     "grip_offsets": targets.grip_offsets.tolist(),
+                    "mirror": targets.mirror,
+                    "gripper_profile": getattr(args, "gripper_profile", "legacy"),
                 })
             if action == "stop":
                 break
@@ -507,7 +517,10 @@ def run_arms_only_manager(
                 # Retain last Dex3 command on tracking loss/menu hold, but use
                 # unchanged legacy trigger/grip IK while tracking is active.
                 if not targets.held:
-                    lh, rh = compute_hands(*solvers, lt, lg, rt, rg)
+                    from gear_sonic.utils.teleop.mirroring import route_hand_inputs
+
+                    hand_inputs = route_hand_inputs(lt, lg, rt, rg, targets.mirror)
+                    lh, rh = compute_hands(*solvers, *hand_inputs)
                     last_hands = (lh.reshape(-1).tolist(), rh.reshape(-1).tolist())
                 socket.send(
                     build_planner_message(
