@@ -4,12 +4,12 @@ import numpy as np
 
 
 def generate_finger_data(hand, trigger, grip, profile="legacy"):
-    if profile not in ("legacy", "rtc", "intern"):
+    if profile not in ("legacy", "rtc", "enhanced"):
         raise ValueError(f"Unknown gripper profile: {profile}")
     fingertips = np.zeros((25, 4, 4))
     fingertips[4, 0, 3] = 1.0
-    if profile == "intern":
-        # Preserve the intern's corrected index / ring / middle selection.
+    if profile == "enhanced":
+        # Select index / ring / middle closure from trigger/grip combinations.
         if trigger > 0.5 and grip > 0.5:
             fingertips[14, 0, 3] = 1.0
         elif trigger > 0.5:

@@ -25,7 +25,7 @@ def route_hand_inputs(lt, lg, rt, rg, mirror=False):
 
 
 def mirror_body_rotations(global_rots):
-    """Preserve the intern's torso-relative legacy SMPL arm reflection."""
+    """Preserve the torso-relative legacy SMPL arm reflection."""
     reflection = np.diag([-1.0, 1.0, 1.0])
     root = global_rots[0]
     relative = [root.inv() * rotation for rotation in global_rots]
@@ -37,7 +37,7 @@ def mirror_body_rotations(global_rots):
 
 
 def mirror_vr_wrist_targets(vr_pose):
-    """Intern's legacy VR convention reflects X; direct arms-only uses robot Y."""
+    """The legacy VR convention reflects X; direct arms-only uses robot Y."""
     original = np.asarray(vr_pose)
     if original.shape != (3, 7):
         raise ValueError(f"Expected VR targets with shape (3, 7), got {original.shape}")

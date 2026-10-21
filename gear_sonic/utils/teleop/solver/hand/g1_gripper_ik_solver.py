@@ -13,7 +13,7 @@ from gear_sonic.utils.teleop.solver.solver import Solver
 
 class G1GripperInverseKinematicsSolver(Solver):
     def __init__(self, side, profile="legacy") -> None:
-        if profile not in ("legacy", "rtc", "intern"):
+        if profile not in ("legacy", "rtc", "enhanced"):
             raise ValueError(f"Unknown gripper profile: {profile}")
         self.profile = profile
         self.side = "L" if side.lower() == "left" else "R"
@@ -108,7 +108,7 @@ class G1GripperInverseKinematicsSolver(Solver):
                 "middle": [0, 0.7, 0.7, -1, -1.5, -1, -1.5],
                 "ring": [0.5, 0.7, 0.7, -0.8, -1.8, -1.8, -1.8],
             },
-            "intern": {
+            "enhanced": {
                 "index": [-0.6, 0.8, 0.8, -1.8, -1.8, -0.8, -1.8],
                 "middle": [0, 0.8, 0.8, -1.5, -1.8, -1.5, -1.8],
                 "ring": [0.6, 0.8, 0.8, -0.8, -1.8, -1.8, -1.8],

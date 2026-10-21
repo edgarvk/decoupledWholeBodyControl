@@ -113,7 +113,7 @@ def test_legacy_pose_and_planner_use_same_mirror_without_changing_recorded_input
     [
         ("legacy", [0, 0.7, 0.7, -1, -1.5, -1, -1.5]),
         ("rtc", [0, 0.7, 0.7, -1, -1.5, -1, -1.5]),
-        ("intern", [0, 0.8, 0.8, -1.5, -1.8, -1.5, -1.8]),
+        ("enhanced", [0, 0.8, 0.8, -1.5, -1.8, -1.5, -1.8]),
     ],
 )
 def test_saved_gripper_profiles_and_right_joint_signs(profile, expected):
@@ -125,7 +125,7 @@ def test_saved_gripper_profiles_and_right_joint_signs(profile, expected):
     )
     opened = left({"position": generate_finger_data("left", 0, 0, profile)})
     np.testing.assert_array_equal(opened, np.zeros(7))
-    if profile == "intern":
+    if profile == "enhanced":
         for trigger, grip, name in [(1, 0, "index"), (0, 1, "ring"), (1, 1, "middle")]:
             actual = left({"position": generate_finger_data("left", trigger, grip, profile)})
             np.testing.assert_allclose(actual, getattr(left, f"_get_{name}_close_q_desired")())
@@ -234,14 +234,14 @@ def test_offline_mirror_preview_returns_to_neutral_and_preserves_raw_recording(t
             start_mode="buttons",
             mapping="direct",
             mirror=True,
-            gripper_profile="intern",
+            gripper_profile="enhanced",
             arms_max_gravity_nm=8,
             left_grip_offset=[0, 0, 0],
             right_grip_offset=[0, 0, 0],
         )
     )
     rows = [json.loads(line) for line in output.read_text().splitlines()]
-    assert rows[0]["mirror"] and rows[0]["gripper_profile"] == "intern"
+    assert rows[0]["mirror"] and rows[0]["gripper_profile"] == "enhanced"
     start, moved, returned = [np.asarray(row["outgoing_pose"]) for row in rows[1:]]
     np.testing.assert_allclose(moved[0, :3] - start[0, :3], [0, 0.02, 0], atol=1e-12)
     np.testing.assert_allclose(moved[1:], start[1:], atol=1e-12)

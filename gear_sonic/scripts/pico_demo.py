@@ -305,7 +305,7 @@ def main():
     pre.set_defaults(func=preview)
     for command in (rep, pre):
         command.add_argument("--mirror", action="store_true")
-        command.add_argument("--gripper-profile", choices=("legacy", "rtc", "intern"), default="legacy")
+        command.add_argument("--gripper-profile", choices=("legacy", "rtc", "enhanced"), default="legacy")
         command.add_argument("--mapping", choices=("filtered", "direct"), default="filtered")
         command.add_argument("--start-mode", choices=("buttons", "auto"), default="buttons")
         command.add_argument("--arms-max-gravity-nm", type=float, default=8)

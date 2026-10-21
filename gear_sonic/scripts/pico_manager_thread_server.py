@@ -2280,7 +2280,7 @@ if __name__ == "__main__":
         ),
     )
     parser.add_argument("--mirror", action="store_true", help="Mirror operator arms and hand routing")
-    parser.add_argument("--gripper-profile", choices=("legacy", "rtc", "intern"), default="legacy")
+    parser.add_argument("--gripper-profile", choices=("legacy", "rtc", "enhanced"), default="legacy")
     args = parser.parse_args()
     MIRROR_TELEOP = args.mirror
     TELEOP_GRIPPER_PROFILE = args.gripper_profile

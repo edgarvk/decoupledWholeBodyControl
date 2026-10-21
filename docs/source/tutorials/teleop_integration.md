@@ -40,23 +40,23 @@ changing its control behavior.
 # Direct controllers, current posture filtering, original hand behavior:
 python -m gear_sonic.scripts.pico_manager_thread_server --manager --arms-only
 
-# Mirrored direct controllers and the intern's gripper profile:
+# Mirrored direct controllers and the enhanced gripper profile:
 python -m gear_sonic.scripts.pico_manager_thread_server \
-    --manager --arms-only --mirror --gripper-profile intern
+    --manager --arms-only --mirror --gripper-profile enhanced
 
 # The same mirror option also supports the existing body/SMPL manager:
 python -m gear_sonic.scripts.pico_manager_thread_server \
-    --manager --mirror --gripper-profile intern --vis_vr3pt --vis_smpl
+    --manager --mirror --gripper-profile enhanced --vis_vr3pt --vis_smpl
 ```
 
 The old `pico_manager_thread_server_mirror.py` command remains a compatibility
-wrapper: it selects `--mirror --gripper-profile intern` on the shared manager.
+wrapper: it selects `--mirror --gripper-profile enhanced` on the shared manager.
 The profiles are joint position presets and gesture mappings, not a change to
 motor torque limits or measured grip force:
 
 - `legacy`: original recorder/teleop presets and trigger-based middle closure.
 - `rtc`: the saved GR00T branch's presets; inference initialization selects these.
-- `intern`: the intern's larger closure presets and index/ring/middle selection
+- `enhanced`: larger closure presets and index/ring/middle selection
   from trigger/grip/both. Existing downstream hand limits still apply.
 
 Mirroring exchanges the operator arms and hand inputs. Physical menu, stick-click,
@@ -64,7 +64,7 @@ start/stop and collection buttons keep their roles. Direct-controller mirroring
 acts on robot-frame controller deltas before calibration: the measured robot
 wrists remain the starting targets even if the robot posture is asymmetric.
 Robot Y is reflected, preserving forward motion and height. The historical
-body/SMPL path retains the intern's legacy X-reflection convention; do not reuse
+body/SMPL path retains the legacy X-reflection convention; do not reuse
 that transform as though the two input coordinate systems were interchangeable.
 Both paths use proper rotation conjugation, not an improper rotation quaternion.
 
@@ -74,7 +74,7 @@ when replaying, so one recording can evaluate several configurations:
 ```bash
 python -m gear_sonic.scripts.pico_demo replay \
     --input recordings/demo.jsonl.gz --mapping filtered \
-    --mirror --gripper-profile intern --log logs/demo-mirrored-intern.jsonl
+    --mirror --gripper-profile enhanced --log logs/demo-mirrored-enhanced.jsonl
 ```
 
 The same options are accepted by `preview`; preview does not execute the policy
