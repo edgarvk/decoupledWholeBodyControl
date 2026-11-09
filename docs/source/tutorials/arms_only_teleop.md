@@ -6,6 +6,38 @@ or body calibration are used. SONIC still commands the whole robot, including
 legs and waist for balance. This is stationary manipulation intent, not a guarantee
 that the robot's feet, torso, or pelvis will remain motionless.
 
+## Offline smoke test
+
+Start here on a fresh checkout of the `arms-only-kinematics` branch. The tests
+use synthetic controller packets and robot feedback and require only Python
+dependencies. Install the dependencies once with network access, then run the
+test command offline. You can skip Git LFS assets for this check.
+
+```bash
+GIT_LFS_SKIP_SMUDGE=1 git clone --depth 1 --branch arms-only-kinematics \
+    https://github.com/edgarvk/decoupledWholeBodyControl.git
+cd decoupledWholeBodyControl
+python3.10 -m venv ../g1-arms-smoke-venv
+source ../g1-arms-smoke-venv/bin/activate
+python -m pip install numpy==1.26.4 scipy==1.15.3 pytest
+```
+
+From the repository root with that environment active, run:
+
+```bash
+python -m pytest -q \
+    gear_sonic/tests/test_arms_only.py::test_reader_never_reads_body_and_head_optional \
+    gear_sonic/tests/test_arms_only.py::test_stale_and_discontinuity_latch_until_reanchor \
+    gear_sonic/tests/test_arms_only.py::test_session_start_failure_modes_hold_stop_without_tracking
+```
+
+Expect three passing tests. They check that the reader accepts controller
+packets without body data, that stale or discontinuous tracking holds the
+targets until reanchoring, and that the session can still stop when tracking
+is lost. Continue to [simulation setup](#setup-and-simulation-startup) for the
+separate check with the simulator and learned controller. Fetch the required Git
+LFS assets before following the simulation setup.
+
 ## Comfort-filter update after the first hardware trials
 
 This revision replaces the latched 60 cm workspace freeze with a recoverable

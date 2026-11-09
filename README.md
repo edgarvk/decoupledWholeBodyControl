@@ -29,6 +29,10 @@ This is the codebase for the **GR00T Whole-Body Control (WBC)** projects. It hos
 - **GEAR-SONIC Series**: our latest iteration of generalist humanoid whole-body controllers (see our [whitepaper](https://nvlabs.github.io/GEAR-SONIC/));
 - **MotionBricks**: a real-time latent generative model for interactive motion control in animation and robotics (see the [project page](https://nvlabs.github.io/motionbricks/)).
 
+## G1 arms-only teleop pilot
+
+Start with the [PICO arms-only teleop guide and offline smoke test](docs/source/tutorials/arms_only_teleop.md#offline-smoke-test) on the `arms-only-kinematics` branch.
+
 ## News
 
 - **[2026-08-31]** **SONIC deployment update** — added per-motor Kp/Kd scaling to reduce stumbling.
